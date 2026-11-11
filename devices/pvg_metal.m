@@ -842,6 +842,30 @@ static uint64_t plane_bytes(HvObject *s, uint32_t i) {
     return row * s->plane_h[i];
 }
 
+/* A surface's page list as the guest has it: n entries of physical address >> 12, bit 0 set for a page that is
+   there. The description's first word points at it. A list of up to 4096 pages is one 16 KB page, read in place.
+   A bigger surface's cannot be, and its first page lists the list's own pages instead, 4096 entries in each:
+   those entries have bit 1 set as well, and the address is what is left without both bits. (Read as one list
+   that went on in the memory behind its first page, most of a 6016x6016 picture's 9216 pages came out missing
+   or as other things' bytes, and what the GPU drew for them never reached the guest: every HEIC decoded to black
+   for the CPU, so the copy macOS saves of a wallpaper was black, and the wallpaper with it after a restart.)
+   `*owned` is what to free. */
+static const uint32_t *surface_list(HvPvgLite *lite, const uint8_t *desc, uint64_t n, uint32_t **owned) {
+    *owned = NULL;
+    uint32_t list;
+    memcpy(&list, desc, 4);
+    if (!(list & 1)) return NULL;
+    const uint32_t *top = hv_pvg_lite_phys(lite, (uint64_t)(list & ~1u) << 12, 0x4000);
+    uint64_t parts = (n + 4095) / 4096;
+    if (n <= 4096 || parts > 4096 || !top || (top[0] & 3) != 3) return hv_pvg_lite_phys(lite, (uint64_t)(list & ~1u) << 12, n * 4);
+    uint32_t *flat = calloc(n, 4);
+    for (uint64_t i = 0; flat && i < parts; i++) {
+        const uint32_t *part = (top[i] & 3) == 3 ? hv_pvg_lite_phys(lite, (uint64_t)(top[i] & ~3u) << 12, 0x4000) : NULL;
+        if (part) memcpy(flat + i * 4096, part, (size_t)MIN((uint64_t)4096, n - i * 4096) * 4); /* else: none of these pages */
+    }
+    return *owned = flat;
+}
+
 /* Guest pixels into its IOSurface, when they changed. */
 static void sync_iosurface(HvObject *s) {
     if (!s->iosurface) return;
@@ -926,7 +950,7 @@ static void sync_iosurface(HvObject *s) {
     HvObject *surface = nil;
     const uint8_t *desc = hv_pvg_lite_surface(lite, (uint32_t)mapping);
     if (!desc) { [self complain:[NSString stringWithFormat:@"surface %llu has no descriptor", mapping]]; return nil; }
-    uint32_t list, first;
+    uint32_t first;
     uint64_t alloc, row;
     /* macOS 15 and later: u64 allocation, width, height and row at 0x18..0x30, plane count at 0x3e, first byte at 0x60.
        macOS 14's driver writes a compact one: u32 allocation at 0x10, width and height << 8 at 0x14 and 0x18, u32 row
@@ -940,7 +964,7 @@ static void sync_iosurface(HvObject *s) {
     uint32_t compact_planes = 1;
     if (compact) memcpy(&compact_planes, desc + 0x24, 4);
     uint8_t planes = compact ? (uint8_t)MIN(MAX(compact_planes, 1u), 4u) : desc[0x3e];
-    memcpy(&list, desc, 4), memcpy(&alloc, desc + 0x18, 8), memcpy(&row, desc + 0x30, 8), memcpy(&first, desc + 0x60, 4);
+    memcpy(&alloc, desc + 0x18, 8), memcpy(&row, desc + 0x30, 8), memcpy(&first, desc + 0x60, 4);
     if (compact) {
         uint32_t a32, r32;
         memcpy(&a32, desc + 0x10, 4), memcpy(&r32, desc + 0x1c, 4);
@@ -961,9 +985,11 @@ static void sync_iosurface(HvObject *s) {
     surface->surface_w = (uint32_t)sw, surface->surface_h = (uint32_t)sh;
     uint64_t n = surface->length >> 14;
     vm_address_t base = 0;
-    const uint32_t *pages = (list & 1) ? hv_pvg_lite_phys(lite, (uint64_t)(list & ~1u) << 12, n * 4) : NULL;
+    uint32_t *owned;
+    const uint32_t *pages = surface_list(lite, desc, n, &owned);
     if (!pages || vm_allocate(mach_task_self(), &base, surface->length, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
         [self complain:[NSString stringWithFormat:@"surface %llu has no pages", mapping]];
+        free(owned);
         return nil;
     }
     surface->mapped = (uint8_t *)base;
@@ -974,6 +1000,11 @@ static void sync_iosurface(HvObject *s) {
         vm_address_t to = base + (i << 14);
         vm_prot_t cur, max;
         vm_remap(mach_task_self(), &to, 0x4000, 0, VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)src, FALSE, &cur, &max, VM_INHERIT_NONE);
+    }
+    {   /* The GPU draws on the host's own empty pages where the guest has none, and the guest never sees it. */
+        uint64_t absent = 0;
+        for (uint64_t i = 0; i < n; i++) absent += !(pages[i] & 1);
+        if (absent) [self complain:[NSString stringWithFormat:@"surface %llu: %llu of its %llu pages are not there", mapping, (unsigned long long)absent, (unsigned long long)n]];
     }
     surface->object = [device newBufferWithBytesNoCopy:surface->mapped length:surface->length options:MTLResourceStorageModeShared
                                            deallocator:^(void *at, NSUInteger size) { vm_deallocate(mach_task_self(), (vm_address_t)at, size); }];
@@ -1018,7 +1049,8 @@ static void sync_iosurface(HvObject *s) {
         }
     }
     fprintf(stderr, "hengevm: pvg-metal: surface %llu: %llux%llu, row %llu, %llu KB, fourcc %c%c%c%c planes %u\n", mapping, (unsigned long long)sw, (unsigned long long)sh, row, alloc >> 10, desc[7], desc[6], desc[5], desc[4], planes);
-        return surface;
+    free(owned);
+    return surface;
 }
 
 /* The surface under a mapping id as the guest describes it now. macOS 14's driver reuses ids for new surfaces
