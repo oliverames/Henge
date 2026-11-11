@@ -10,11 +10,15 @@
 #define F_RO (1ull << 5)
 #define F_BLK_SIZE (1ull << 6)
 #define F_FLUSH (1ull << 9)
+#define F_DISCARD (1ull << 13)
+#define F_WRITE_ZEROES (1ull << 14)
 
 #define T_IN 0
 #define T_OUT 1
 #define T_FLUSH 4
 #define T_GET_ID 8
+#define T_DISCARD 11
+#define T_WRITE_ZEROES 13
 #define T_APPLE_BARRIER 0x10000
 
 #define S_OK 0
@@ -53,6 +57,39 @@ static uint32_t readable(const HvVirtqElem *e) {
     return n;
 }
 
+/* Discard and write-zeroes, which only the auxiliary disk offers: {sector, sectors, flags} after the header.
+   macOS keeps a panic's log in a part of that disk and, having read it at the next start, lets go of it with
+   an unmap, which its driver only sends as a discard where the disk offers one: without, the unmap did nothing
+   and said it had, so the one panic was found, written up and shown ("restarted because of a problem") at every
+   start from then on. A discard may leave the bytes alone, and does here, as QEMU's disks do by default, except
+   over a panic's log, which is what has to be gone; zeroes are written where zeroes are asked for. */
+static uint8_t wipe(HvVirtioBlk *b, HvVirtqElem *e, uint32_t type) {
+    struct { uint64_t sector; uint32_t sectors, flags; } r;
+    if (hv_virtq_read(&b->vio, e, 16, &r, sizeof r) != sizeof r) return S_IOERR;
+    uint64_t at = r.sector * 512, len = (uint64_t)r.sectors * 512;
+    if (r.sector > b->disk->size / 512 || len > b->disk->size - at) return S_IOERR;
+    static uint8_t buf[1 << 20]; /* the workers take turns at it */
+    static pthread_mutex_t turn = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&turn);
+    int gone = type == T_WRITE_ZEROES, bad = 0;
+    for (uint64_t o = 0; !gone && !bad && o < len; o += sizeof buf - 16) { /* pieces overlap: a mark may lie across two */
+        uint64_t n = len - o < sizeof buf ? len - o : sizeof buf;
+        if (hv_disk_read(b->disk, at + o, buf, n) != 0) bad = 1;
+        else gone = memmem(buf, n, "panic(cpu ", 10) != NULL;
+    }
+    memset(buf, 0, sizeof buf);
+    for (uint64_t o = 0; gone && !bad && o < len; o += sizeof buf) {
+        uint64_t n = len - o < sizeof buf ? len - o : sizeof buf;
+        if (hv_disk_write(b->disk, at + o, buf, n) != 0) bad = 1;
+    }
+    pthread_mutex_unlock(&turn);
+    static int told;
+    if (told++ < 40)
+        fprintf(stderr, "virtio-blk aux: %s of %u sectors from %llu (flags %x): %s\n", type == T_DISCARD ? "discard" : "write zeroes",
+                r.sectors, (unsigned long long)r.sector, r.flags, bad ? "failed" : gone ? "zeroed" : "left as it is");
+    return bad ? S_IOERR : S_OK;
+}
+
 /* Worker thread. */
 static int handle(HvVirtioBlk *b, HvVirtqElem *e, uint32_t *written) {
     HvVirtio *v = &b->vio;
@@ -84,6 +121,9 @@ static int handle(HvVirtioBlk *b, HvVirtqElem *e, uint32_t *written) {
         break;
     }
     case T_APPLE_BARRIER: /* a no-op here, as in QEMU: requests complete in order */
+        break;
+    case T_DISCARD: case T_WRITE_ZEROES:
+        status = b->wipes ? wipe(b, e, hdr.type) : S_UNSUPP;
         break;
     default:
         status = S_UNSUPP;
@@ -265,8 +305,10 @@ HvVirtioBlk *hv_virtio_blk_create(HvMachine *m, HvPcie *bus, HvDisk *disk, int a
     HvVirtioBlk *b = calloc(1, sizeof *b);
     if (!b) return NULL;
     HvVirtio *v = &b->vio;
-    hv_virtio_init(v, m, 2, 0x010000, 1, F_SEG_MAX | F_BLK_SIZE | F_FLUSH | (disk->readonly ? F_RO : 0));
+    int wipes = apple_variant == HV_VBLK_AUX && !disk->readonly; /* see wipe() */
+    hv_virtio_init(v, m, 2, 0x010000, 1, F_SEG_MAX | F_BLK_SIZE | F_FLUSH | (disk->readonly ? F_RO : 0) | (wipes ? F_DISCARD | F_WRITE_ZEROES : 0));
     v->dev = b;
+    b->wipes = wipes;
     v->notify = notify;
     b->disk = disk;
     b->ring = calloc(HV_VBLK_RING, sizeof *b->ring);
@@ -295,6 +337,11 @@ HvVirtioBlk *hv_virtio_blk_create(HvMachine *m, HvPcie *bus, HvDisk *disk, int a
     memcpy(v->config + 12, &seg_max, 4);
     memcpy(v->config + 20, &blk_size, 4);
     memcpy(v->config + 34, &num_queues, 2);
+    if (wipes) { /* one range a request, of any length on the disk, at any sector */
+        uint32_t most = capacity > 0xffffffffu ? 0xffffffffu : (uint32_t)capacity, one = 1;
+        memcpy(v->config + 36, &most, 4), memcpy(v->config + 40, &one, 4), memcpy(v->config + 44, &one, 4); /* discard: sectors, ranges, alignment */
+        memcpy(v->config + 48, &most, 4), memcpy(v->config + 52, &one, 4);                                   /* write zeroes: sectors, ranges */
+    }
     memcpy(v->config + 60, &apple_type, 4);
     v->config_len = 96;
     if (apple_variant) {
