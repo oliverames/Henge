@@ -581,6 +581,9 @@ enum RemotePairingPortDiscovery {
         var finished = false
         var resolvedPort: UInt16?
         var pendingConnection: NWConnection?
+        var firstResultAt: Date?
+        var waitScheduled = false
+        var latestResults: [NWBrowser.Result] = []
 
         func finish(_ port: UInt16?) {
             resultLock.lock()
@@ -598,23 +601,41 @@ enum RemotePairingPortDiscovery {
             return finished
         }
 
-        browser.browseResultsChangedHandler = { results, _ in
+        // Other devices on the network advertise RemotePairing too; only this device's own (loopback) will do,
+        // unless none turns up within RemotePairingChoice.loopbackWait.
+        func evaluate() {
             guard !hasFinished() else { return }
-
-            let preferred = results.first { result in
-                result.interfaces.contains { $0.name == "lo0" }
-            } ?? results.first
-            guard let result = preferred, case .service = result.endpoint else { return }
-
             resultLock.lock()
-            let alreadyConnecting = pendingConnection != nil
-            if !alreadyConnecting {
-                pendingConnection = NWConnection(to: result.endpoint, using: parameters)
+            let services = latestResults.filter { if case .service = $0.endpoint { return true } else { return false } }
+            if firstResultAt == nil, !services.isEmpty { firstResultAt = Date() }
+            let waited = firstResultAt.map { Date().timeIntervalSince($0) } ?? 0
+            let decision = RemotePairingChoice.choose(
+                interfaces: services.map { $0.interfaces.map(\.name) }, waited: waited)
+            var chosen: NWBrowser.Result?
+            switch decision {
+            case .none:
+                break
+            case .wait:
+                if !waitScheduled {
+                    waitScheduled = true
+                    queue.asyncAfter(deadline: .now() + RemotePairingChoice.loopbackWait) { evaluate() }
+                }
+            case .loopback(let index), .fallback(let index):
+                if pendingConnection == nil { chosen = services[index] }
             }
-            let connection = pendingConnection
+            var connection: NWConnection?
+            if let chosen {
+                pendingConnection = NWConnection(to: chosen.endpoint, using: parameters)
+                connection = pendingConnection
+            }
             resultLock.unlock()
 
-            guard !alreadyConnecting, let connection else { return }
+            guard let chosen, let connection else { return }
+            let loopback: Bool
+            if case .loopback = decision { loopback = true } else { loopback = false }
+            HengeLog.log("jit", "RemotePairing result chosen: \(chosen.endpoint) on "
+                        + chosen.interfaces.map(\.name).joined(separator: ",")
+                        + (loopback ? " (loopback)" : " (no loopback result within \(RemotePairingChoice.loopbackWait)s)"))
 
             connection.stateUpdateHandler = { state in
                 switch state {
@@ -632,6 +653,13 @@ enum RemotePairingPortDiscovery {
                 }
             }
             connection.start(queue: queue)
+        }
+
+        browser.browseResultsChangedHandler = { results, _ in
+            resultLock.lock()
+            latestResults = Array(results)
+            resultLock.unlock()
+            evaluate()
         }
 
         browser.stateUpdateHandler = { state in
