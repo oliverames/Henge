@@ -268,9 +268,11 @@ final class HIDPPMouse {
         let motion = controls.first { $0.cid == 0xC3 && $0.flags2 & 0x02 != 0 } ?? controls.first { $0.flags2 & 0x02 != 0 }
         for c in controls {
             var flags: UInt8 = 0
-            if c.flags & 0x20 != 0 { flags |= 0x03 }                // divert, valid
+            // Only the buttons the Mac's mouse has. The rest keep doing what the mouse does with them on its own:
+            // an MX Master's wheel-mode button (0xC4) still switches its wheel between ratchet and free spin.
+            if c.flags & 0x20 != 0, Self.usbButton(c.cid) != nil || c.cid == motion?.cid { flags |= 0x03 } // divert, valid
             if c.cid == motion?.cid { flags |= 0x30 | 0xC0 }        // raw XY and force raw XY, valid
-            let wantsAnalytics = c.flags & 0x20 == 0 && c.flags2 & 0x04 != 0
+            let wantsAnalytics = c.flags & 0x20 == 0 && c.flags2 & 0x04 != 0 && Self.usbButton(c.cid) != nil
             if flags != 0 || wantsAnalytics { steps.append((c.cid, flags, wantsAnalytics ? 0x03 : 0)) }
         }
         if motion == nil { HengeLog.log("mouse-hidpp", "\(name): no control can carry raw motion; the pointer won't move") }
@@ -432,18 +434,26 @@ final class HIDPPMouse {
     }
 
     /// A control id as the USB mouse's button bit: left, right, middle, back, forward.
-    private func press(_ cid: UInt16, _ pressed: Bool) {
-        let bit: UInt32
+    private static func usbButton(_ cid: UInt16) -> UInt32? {
         switch cid {
-        case 0x50: bit = 0
-        case 0x51: bit = 1
-        case 0x52: bit = 2
-        case 0x53: bit = 3
-        case 0x56: bit = 4
-        default:
-            HengeLog.log("mouse-hidpp", String(format: "\(name): control 0x%02X %@ (not mapped)", cid, pressed ? "down" : "up"))
-            return
+        case 0x50: return 0
+        case 0x51: return 1
+        case 0x52: return 2
+        case 0x53: return 3
+        case 0x56: return 4
+        default: return nil
         }
+    }
+
+    private var pressesLogged = 0
+
+    private func press(_ cid: UInt16, _ pressed: Bool) {
+        let bit = Self.usbButton(cid)
+        if pressesLogged < 64 {
+            pressesLogged += 1
+            HengeLog.log("mouse-hidpp", String(format: "\(name): control 0x%02X %@ -> %@", cid, pressed ? "down" : "up", bit.map { "button \($0)" } ?? "not mapped"))
+        }
+        guard let bit else { return }
         HardwareMouse.shared.vendorButton(bit, pressed)
     }
 }
