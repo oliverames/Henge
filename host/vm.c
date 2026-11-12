@@ -15,6 +15,7 @@
 #include <time.h>
 
 #include "usb_host.h"
+#include "window.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -285,6 +286,7 @@ static int fail(char *err, size_t n, const char *msg) {
    there, for a crash report cannot. */
 static struct sigaction prior_ill, prior_bus, prior_segv;
 static void on_ill(int sig, siginfo_t *info, void *ctx) {
+    if (sig != SIGILL && hv_window_signal(&m, info, ctx)) return; /* a user page entering the window (window.c) */
     ucontext_t *uc = ctx;
     uint64_t pc = uc->uc_mcontext->__ss.__pc, rx = (uint64_t)(uintptr_t)m.jit.base, size = (uint64_t)m.jit.capacity * 4;
     uint64_t used = (uint64_t)hv_jit_extent(&m.jit) * 4;
@@ -413,6 +415,7 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
     m.gen_checks = getenv("HV_JIT_POISON") != NULL;
     if (getenv("HV_SLOW_MEM")) m.slow_mem = 1; /* debugging: every load and store through the helper */
     ncpus = c->ncpus < 1 ? 1 : c->ncpus > HV_MAX_CPUS ? HV_MAX_CPUS : c->ncpus;
+    hv_window_reserve(&m, ncpus); /* HV_EL0_WINDOW: before any CPU resets (each takes its window then) */
     m.big_lock_on = ncpus > 1 && getenv("HV_BIG_LOCK"); /* debugging: one CPU in guest code at a time */
     HvCfgParams cfg = {.nr_cpus = (uint32_t)ncpus, .ecid = c->ecid, .seed = c->seed, .mac_en0 = {0x02, 0x48, 0x56, 0x4d, 0x00, 0x01}};
     if (c->installer) cfg.run_installer1 = cfg.run_installer2 = 1;

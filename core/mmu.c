@@ -1,4 +1,5 @@
 #include "mmu.h"
+#include "window.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -141,6 +142,7 @@ int hv_tlb_tmajor;
 
 void hv_tlb_flush(HvCpu *cpu) {
     if (cpu->m) cpu->m->stats.tlb_flushes++;
+    hv_window_drop_all(cpu);
     if (cpu->m) cpu->m->stats.reset_why[0]++;
     hv_ijc_reset(cpu, 0); /* mappings changed: branch targets cached by VA are no longer trusted */
     hv_ijc_reset(cpu, 1);
@@ -309,6 +311,7 @@ void hv_ijc_reset(HvCpu *cpu, int kernel) {
    the kernel's TTBR1 entries stay. */
 void hv_tlb_flush_user(HvCpu *cpu) {
     if (cpu->m) cpu->m->stats.tlb_flushes++;
+    hv_window_drop_all(cpu);
     uint32_t n = cpu->nuser_fills;
     cpu->nuser_fills = 0;
     if (n <= HV_USER_FILLS) {
@@ -330,6 +333,7 @@ void hv_tlb_flush_user(HvCpu *cpu) {
 /* A TLBI for a big user range: only the user entries filled since the last
    flush that fall in it (all of them if there were too many to list). */
 void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len) {
+    hv_window_drop_range(cpu, va, len);
     uint32_t n = cpu->nuser_fills;
     if (n > HV_USER_FILLS) {
         hv_tlb_flush_user(cpu);
@@ -383,6 +387,7 @@ void hv_tlb_protect_code_page(HvCpu *cpu, HvRam *ram, uint64_t pg) {
     uint64_t *hint = &ram->whint[(size_t)cpu->index * ram->npages + pg];
     uint64_t h = __atomic_exchange_n(hint, 0, __ATOMIC_SEQ_CST);
     const uint8_t *host_page = ram->host + (pg << HV_TLB_PAGE_BITS);
+    hv_window_protect(cpu, host_page);
     if (cpu->m) if (cpu->m->stats_interval) cpu->m->stats.protect_kind[h & HV_WHINT_MANY ? 2 : h ? 1 : 0]++;
     if (h & HV_WHINT_MANY) {
         hv_tlb_protect_code(cpu, host_page);
@@ -486,7 +491,7 @@ void hv_tlb_flush_va_asid(HvCpu *cpu, uint64_t va, int asid) {
     /* Tagged addresses may sit in any slot's tag byte, so check by the low 56 bits. */
     uint32_t idx = (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
     hv_ijc_drop_va(cpu, va, asid);
-    if (!((va >> 55) & 1)) hv_tlb_stash_drop(cpu, asid);
+    if (!((va >> 55) & 1)) hv_tlb_stash_drop(cpu, asid), hv_window_drop_range(cpu, va, 1);
     for (int el = 0; el < 3; el++) {
         HvTlbEntry *e = hv_tlb_ent(cpu, idx, el);
         memset(e, 0x80, sizeof *e);
@@ -499,7 +504,7 @@ void hv_tlb_flush_va_asid(HvCpu *cpu, uint64_t va, int asid) {
 void hv_tlb_flush_va_page(HvCpu *cpu, uint64_t va, int asid) {
     uint32_t idx = (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
     hv_ijc_drop_va(cpu, va, asid);
-    if (!((va >> 55) & 1) && cpu->pc_state) stash_drop_va(cpu->pc_state, va, asid);
+    if (!((va >> 55) & 1) && cpu->pc_state) stash_drop_va(cpu->pc_state, va, asid), hv_window_drop_range(cpu, va, 1);
     for (int el = 0; el < 3; el++) {
         HvTlbEntry *e = hv_tlb_ent(cpu, idx, el);
         memset(e, 0x80, sizeof *e);
@@ -736,7 +741,7 @@ int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid) {
     if ((s1 & 1) && !walks_elsewhere(target, s1, s1, va, 1)) { if (target->m->stats_interval) target->m->stats.race_kind[0]++; return 0; }
     uint32_t c1 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
     if (c1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; } /* caching a block it may have looked up through the old mapping */
-    if (!((va >> 55) & 1)) stash_drop_va(p, va, asid);
+    if (!((va >> 55) & 1)) stash_drop_va(p, va, asid), hv_window_drop_range(target, va, 1);
     uint32_t idx = (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
     int fetched = 0; /* the target may be running code from the page: it must leave and look again */
     for (int t = 0; t < 3; t++) { /* the slot whatever its tag byte, as hv_tlb_flush_va_asid does */
@@ -774,7 +779,7 @@ int hv_tlbi_drop_remote_range(HvCpu *target, uint64_t va, uint64_t npages, int a
     if ((s1 & 1) && !walks_elsewhere(target, s1, s1, va, npages)) { if (target->m->stats_interval) target->m->stats.race_kind[0]++; return 0; }
     uint32_t c1 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
     if (c1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; }
-    if (!((va >> 55) & 1)) stash_drop_range(p, va, npages, asid);
+    if (!((va >> 55) & 1)) stash_drop_range(p, va, npages, asid), hv_window_drop_range(target, va, npages << HV_TLB_PAGE_BITS);
     int fetched = 0;
     for (uint64_t i = 0; i < npages && i < HV_TLB_SIZE; i++) { /* past HV_TLB_SIZE pages the slots come round again */
         uint32_t idx = (uint32_t)((va >> HV_TLB_PAGE_BITS) + i) & (HV_TLB_SIZE - 1);
@@ -1311,6 +1316,8 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
     }
     if (s) s->n = k;
     cpu->nuser_fills = nkept;
+    if (keeping) hv_window_drop_except(cpu, SHARED_LO, keep, SHARED_CHUNKS);
+    else hv_window_drop_all(cpu);
     if (keeping && m->stats_interval) m->stats.shared_keeps++, m->stats.shared_kept += nkept;
 
     for (int i = 0; i < HV_STASHES; i++) {

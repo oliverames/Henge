@@ -6,7 +6,7 @@ CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices $(ENGINE_DEFS)
 B = build
 
 CORE = $(B)/classify.o $(B)/operands.o $(B)/translate.o $(B)/dispatch.o $(B)/mmu.o $(B)/memop.o \
-       $(B)/exception.o $(B)/sysreg.o $(B)/machine.o
+       $(B)/exception.o $(B)/sysreg.o $(B)/machine.o $(B)/window.o
 HOST = $(B)/jit_region.o $(B)/enter.o $(B)/disk.o
 DEV = $(B)/pvg_lite.o $(B)/pvg_metal.o $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/cfg.o $(B)/bdif.o $(B)/pcie.o \
       $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o $(B)/virtio_usb.o $(B)/virtio_balloon.o $(B)/xhci.o $(B)/vmapple.o $(B)/aes.o $(B)/pl061.o $(B)/metallib.o
@@ -67,8 +67,10 @@ $(B)/hengevm: host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/
 	    -framework Foundation -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -framework CoreFoundation \
 	    -framework AppKit -framework QuartzCore -o $@
 
-# mmu.c: no SIMD (hv_tlb_refill runs with the guest's SIMD registers live).
+# mmu.c and window.c (which its TLB drops call): no SIMD (hv_tlb_refill runs with the guest's SIMD registers live).
 $(B)/mmu.o: core/mmu.c core/*.h host/*.h | $(B)
+	$(CC) $(CFLAGS) -mgeneral-regs-only -c $< -o $@
+$(B)/window.o: core/window.c core/*.h host/*.h | $(B)
 	$(CC) $(CFLAGS) -mgeneral-regs-only -c $< -o $@
 $(B)/%.o: core/%.c core/*.h host/*.h | $(B)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -139,6 +141,9 @@ IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/fault_bench.c host/jit_regio
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_SRC)) $(IB)/host/enter.o $(IB)/devices/pvg_metal.o
 
 $(IB)/core/mmu.o: core/mmu.c core/*.h host/*.h devices/*.h
+	@mkdir -p $(dir $@)
+	$(IOS_CC) $(IOS_CFLAGS) -mgeneral-regs-only -c $< -o $@
+$(IB)/core/window.o: core/window.c core/*.h host/*.h devices/*.h
 	@mkdir -p $(dir $@)
 	$(IOS_CC) $(IOS_CFLAGS) -mgeneral-regs-only -c $< -o $@
 $(IB)/%.o: %.c core/*.h host/*.h devices/*.h
