@@ -8,6 +8,7 @@
    - mach fault: the same through an exception port on the faulting thread, handled by
      another thread, which never reaches a task-level port such as an attached debugger's
    - remap / remap+touch: vm_remap of one page over another (FIXED|OVERWRITE), then first use
+   - largest reserve: the biggest stretch of address space one mmap can take
    A fault that never comes back (a debugger holding it) hangs the boot; the log line before
    says which test it was. Off unless HV_FAULT_BENCH is set. */
 #include <mach/mach.h>
@@ -188,6 +189,20 @@ static void bench_remap(void) {
     munmap(src, (size_t)NPAGES * PAGE);
 }
 
+/* The biggest single stretch of address space this process can reserve (a window for guest user memory needs one). */
+static void bench_reserve(void) {
+    size_t best = 0;
+    void *at = NULL;
+    for (int bits = 47; bits >= 30 && !best; bits--)
+        for (int half = 1; half >= 0 && !best; half--) {
+            size_t len = ((size_t)1 << bits) + (half ? (size_t)1 << (bits - 1) : 0);
+            void *p = mmap(NULL, len, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
+            if (p != MAP_FAILED) best = len, at = p;
+        }
+    fprintf(stderr, "fault-bench: largest reserve %.1f GB at %p\n", best / 1073741824.0, at);
+    if (best) munmap(at, best);
+}
+
 void hv_fault_bench(void) {
     if (!getenv("HV_FAULT_BENCH")) return;
     mach_timebase_info_data_t tb;
@@ -196,6 +211,7 @@ void hv_fault_bench(void) {
     region = mmap(NULL, (size_t)NPAGES * PAGE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (region == MAP_FAILED) { fprintf(stderr, "fault-bench: mmap failed\n"); return; }
     memset(region, 0, (size_t)NPAGES * PAGE);
+    bench_reserve();
     bench_mprotect();
     bench_mach();
     bench_signal();

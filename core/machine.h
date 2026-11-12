@@ -84,6 +84,7 @@ typedef struct HvStats {
     uint64_t tr_waits, tr_wait_ticks;   /* translation lock likewise */
     uint64_t words_inline, words_ool, words_pool; /* translated code size by part */
     uint64_t refills;
+    uint64_t refill_el0_va[4]; /* EL0 light refills by guest VA: below 4 GB, 64 GB, 512 GB, above (how much a direct-mapped window could cover) */
     uint64_t refill_map[2][3]; /* light refills by EL (0, 1) and the guest mapping they found: a 16 KB page, a block up to 32 MB, a bigger block */
     uint64_t ijc_light;       /* branch-cache misses resolved without the dispatcher (hv_ijc_resolve) */         /* TLB misses filled by the light path (hv_tlb_refill) */
     uint64_t stash_saves, stash_hits, stash_entries; /* user TLB entries kept across process switches */
