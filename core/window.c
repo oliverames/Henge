@@ -30,7 +30,7 @@
 typedef struct HvWindow {
     uint8_t *base;
     uint64_t size;
-    _Atomic int lock;
+    int lock;
     uint32_t n;
     struct { uint64_t va; const uint8_t *host; uint8_t rw; } slot[SLOTS]; /* va 0: empty (page 0 is never mapped) */
 } HvWindow;
