@@ -717,6 +717,9 @@ static void print_stats(HvCpu *cpu, int force) {
                 RATE(kick_src[0]), RATE(kick_src[1]), RATE(kick_src[3]), RATE(kick_src[2]), RATE(kick_src[4]));
         fprintf(stderr, "  light refills %.0fK/s, light branch-cache fills %.0fK/s, chained to other pages %.0f/s\n", RATE(refills) / 1e3,
                 RATE(ijc_light) / 1e3, RATE(xchained));
+        fprintf(stderr, "  light refills K/s by mapping: el0 page %.0f block %.0f big block %.0f, el1 page %.0f block %.0f big block %.0f\n",
+                RATE(refill_map[0][0]) / 1e3, RATE(refill_map[0][1]) / 1e3, RATE(refill_map[0][2]) / 1e3,
+                RATE(refill_map[1][0]) / 1e3, RATE(refill_map[1][1]) / 1e3, RATE(refill_map[1][2]) / 1e3);
         fprintf(stderr, "  process switches: %.0f/s saved, %.0f/s restored, %.0f/s dropped by a TLBI (%.0f entries each)\n", RATE(stash_saves), RATE(stash_hits), RATE(stash_stale),
                 s->stash_hits - last.stash_hits ? (double)(s->stash_entries - last.stash_entries) / (s->stash_hits - last.stash_hits) : 0.0);
         fprintf(stderr, "  tlb misses K/s: el0 empty %.0f el0 conflict %.0f el1 empty %.0f el1 conflict %.0f\n",
