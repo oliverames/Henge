@@ -204,6 +204,16 @@ static void bench_reserve(void) {
     if (best) munmap(at, best);
 }
 
+/* Always, at boot: the address range the kernel gave this process (the extended-virtual-addressing entitlement
+   raises max_address). Too little shows up here, not later as a misleading out-of-space error. */
+void hv_log_va_range(void) {
+    task_vm_info_data_t vi;
+    mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) == KERN_SUCCESS)
+        fprintf(stderr, "henge: address space %#llx-%#llx (%.0f GB)\n", (unsigned long long)vi.min_address,
+                (unsigned long long)vi.max_address, (double)(vi.max_address - vi.min_address) / 1073741824.0);
+}
+
 void hv_fault_bench(void) {
     if (!getenv("HV_FAULT_BENCH")) return;
     mach_timebase_info_data_t tb;
