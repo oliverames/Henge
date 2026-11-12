@@ -22,6 +22,26 @@ import Foundation
     func setRequestInterruptionBlock(_ block: @escaping (NSUUID?) -> Void)
 }
 
+/// LiveContainer, when it runs Henge as a guest app (LC_HOME_PATH is its marker).
+///
+/// Its nightly builds can start a guest's own app extensions as helper processes ("Helper Process Support" in the
+/// app's settings there): LiveContainer then answers NSExtension's calls for Henge's PlugIns itself and runs the
+/// extension in its LiveProcess, so Built-in StikJIT works unchanged. Without that setting Henge's helper is not
+/// installed anywhere iOS can find it.
+enum LiveContainerHost {
+    static var isHosting: Bool { getenv("LC_HOME_PATH") != nil }
+
+    /// The guest app's LiveContainer settings, which LiveContainer exposes as a class property of NSUserDefaults.
+    private static var guestAppInfo: [String: Any]? {
+        let selector = NSSelectorFromString("guestAppInfo")
+        guard isHosting, (UserDefaults.self as AnyObject).responds(to: selector) else { return nil }
+        return (UserDefaults.self as AnyObject).perform(selector)?.takeUnretainedValue() as? [String: Any]
+    }
+
+    /// Whether LiveContainer starts Henge's helper extension for it.
+    static var runsHelperProcesses: Bool { (guestAppInfo?["helperProcessesSupport"] as? Bool) ?? false }
+}
+
 /// Starts the separate helper process (PlugIns/HengeJITHelper.appex) that debugs Henge.
 ///
 /// The helper is found by the bundle identifier it has in this installation,
@@ -48,8 +68,9 @@ enum HengeBuiltInJIT {
         guard #available(iOS 26.0, *) else {
             return "Built-in JIT needs iOS 26 or later. Use StikDebug instead."
         }
-        if getenv("LC_HOME_PATH") != nil {
-            return "Built-in JIT is unavailable inside LiveContainer. Use StikDebug instead."
+        if LiveContainerHost.isHosting && !LiveContainerHost.runsHelperProcesses {
+            return "Inside LiveContainer, built-in JIT needs Helper Process Support, a LiveContainer nightly setting: "
+                 + "turn it on in Henge's settings in LiveContainer, or use StikDebug."
         }
         return nil
 #endif

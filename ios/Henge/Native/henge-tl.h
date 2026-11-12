@@ -58,5 +58,13 @@ double henge_tl_app_screen_height(void);
 void henge_tl_app_mouse(int type, double x, double y, int clicks, unsigned long flags);
 void henge_tl_app_scroll(double x, double y, double dx, double dy, int phase);
 void henge_tl_app_key(int down, unsigned short keycode, const char *chars, unsigned long flags);
+/* The app's menu bar menus, for the screen's menu button (a Mac app's menu bar has no place on iOS): a retained
+   NSArray of items, each a dictionary with "title", "enabled", "state" (1 on, -1 mixed), "separator", "path" (the
+   item's indices from the menu bar down, for henge_tl_app_menu_choose) and, for a submenu, "children". The menus are
+   brought up to date (enabled items, menus an app fills as they open) as AppKit does before showing them. NULL
+   without a menu bar. Main thread. */
+const void *henge_tl_app_main_menu(void);
+/* Chooses the item at a path from henge_tl_app_main_menu: its action is sent, as AppKit does. Main thread. */
+void henge_tl_app_menu_choose(const int *path, int depth);
 
 #endif

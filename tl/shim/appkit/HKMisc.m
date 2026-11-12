@@ -348,7 +348,7 @@ static BOOL g_uses_user_key_equivalents;
     NSMutableArray<NSMenuItem *> *_items;
     NSFont *_font;
     CGFloat _minimumWidth;
-    BOOL _showsStateColumn, _allowsContextMenuPlugIns;
+    BOOL _showsStateColumn, _allowsContextMenuPlugIns, _updating, _preparing;
     NSInteger _layoutDirection;
 }
 @synthesize title = _title, delegate = _delegate, autoenablesItems = _autoenablesItems, supermenu = _supermenu;
@@ -358,7 +358,7 @@ static BOOL g_menu_bar_visible = YES;
 + (void)setMenuBarVisible:(BOOL)visible { g_menu_bar_visible = visible; }
 + (CGFloat)menuBarHeight { return 0; }
 + (void)popUpContextMenu:(NSMenu *)menu withEvent:(NSEvent *)event forView:(NSView *)view {
-    hk_log("NSMenu: context menu \"%s\" (%ld items) not shown", menu.title.UTF8String, (long)menu.numberOfItems);
+    hk_menu_context(menu, event, view); /* HKMenu.m */
 }
 + (void)popUpContextMenu:(NSMenu *)menu withEvent:(NSEvent *)event forView:(NSView *)view withFont:(NSFont *)font {
     [self popUpContextMenu:menu withEvent:event forView:view];
@@ -452,7 +452,7 @@ static BOOL g_menu_bar_visible = YES;
 - (void)submenuAction:(id)sender {}
 - (void)itemChanged:(NSMenuItem *)item {}
 - (BOOL)isMainMenu { return NSApp.mainMenu == self; }
-- (NSMenuItem *)highlightedItem { return nil; }
+- (NSMenuItem *)highlightedItem { return hk_menu_highlighted(self); }
 - (NSFont *)font { return _font ?: [NSFont menuFontOfSize:0]; }
 - (void)setFont:(NSFont *)font { _font = font; }
 - (CGFloat)minimumWidth { return _minimumWidth; }
@@ -467,11 +467,10 @@ static BOOL g_menu_bar_visible = YES;
 - (void)setUserInterfaceLayoutDirection:(NSInteger)d { _layoutDirection = d; }
 - (BOOL)isTornOff { return NO; }
 - (NSArray<NSMenuItem *> *)selectedItems { return @[]; }
-- (void)cancelTracking {}
-- (void)cancelTrackingWithoutAnimation {}
+- (void)cancelTracking { hk_menu_cancel(self); }
+- (void)cancelTrackingWithoutAnimation { hk_menu_cancel(self); }
 - (BOOL)popUpMenuPositioningItem:(NSMenuItem *)item atLocation:(NSPoint)location inView:(NSView *)view {
-    hk_log("NSMenu: pop-up menu \"%s\" (%ld items) not shown", _title.UTF8String, (long)_items.count);
-    return NO;
+    return hk_menu_positioned(self, item, location, view);
 }
 
 /* Whether an item's action can be sent now: its own enabled flag, or (autoenabling) whether some target takes the
@@ -487,12 +486,22 @@ static BOOL g_menu_bar_visible = YES;
     if ([target respondsToSelector:@selector(validateUserInterfaceItem:)]) return [target validateUserInterfaceItem:item];
     return YES;
 }
+/* As AppKit's: the items' enabling only (validation can call back into update: once at a time). */
 - (void)update {
-    id d = _delegate;
-    if ([d respondsToSelector:@selector(menuNeedsUpdate:)]) [d menuNeedsUpdate:self];
-    if (!_autoenablesItems) return;
+    if (!_autoenablesItems || _updating) return;
+    _updating = YES;
     for (NSMenuItem *i in [_items copy])
         if (!i.isSeparatorItem) i.enabled = [self hk_validate:i];
+    _updating = NO;
+}
+/* Before a menu shows: the delegate fills it (menuNeedsUpdate:, once at a time), then its items are enabled. */
+- (void)hk_prepare {
+    if (_preparing) return;
+    _preparing = YES;
+    id d = _delegate;
+    if ([d respondsToSelector:@selector(menuNeedsUpdate:)]) [d menuNeedsUpdate:self];
+    _preparing = NO;
+    [self update];
 }
 - (void)performActionForItemAtIndex:(NSInteger)index {
     NSMenuItem *item = [self itemAtIndex:index];

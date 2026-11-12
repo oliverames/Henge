@@ -460,6 +460,12 @@ const HKPresenter *hk_presenter(void);
 
 /* Input from the presenter, in the window's coordinates (points, origin bottom left as AppKit's). Any thread: the
    event is posted to the application's queue. */
+/* Menus that pop up, drawn and tracked by Henge (HKMenu.m). */
+void hk_menu_context(NSMenu *menu, NSEvent *event, NSView *view);
+BOOL hk_menu_positioned(NSMenu *menu, NSMenuItem *item, NSPoint location, NSView *view);
+void hk_menu_cell_click(id cell, NSRect frame, NSView *view);
+void hk_menu_cancel(NSMenu *menu);
+NSMenuItem *hk_menu_highlighted(NSMenu *menu);
 void hk_post_mouse(NSWindow *window, NSEventType type, CGPoint location, NSEventModifierFlags flags, NSInteger clicks);
 void hk_post_scroll(NSWindow *window, CGPoint location, CGFloat dx, CGFloat dy, NSEventPhase phase);
 void hk_post_key(NSWindow *window, NSEventType type, unsigned short keycode, NSString *chars, NSString *unmod, NSEventModifierFlags flags);
@@ -672,6 +678,8 @@ id hk_font_adopt(id obj);
 - (NSInteger)indexOfItemWithRepresentedObject:(id)object;
 - (NSInteger)indexOfItemWithTarget:(id)target andAction:(SEL)action;
 - (void)update;
+/* Before the menu shows: the delegate's menuNeedsUpdate:, then update. */
+- (void)hk_prepare;
 /* Finds the enabled item whose key equivalent the key-down event is, and sends its action. */
 - (BOOL)performKeyEquivalent:(NSEvent *)event;
 - (void)performActionForItemAtIndex:(NSInteger)index;

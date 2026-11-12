@@ -82,6 +82,9 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         rightClick.buttonMaskRequired = .secondary
         rightClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         for g in [wheel, hover, drag, click, rightClick] as [UIGestureRecognizer] { addGestureRecognizer(g) }
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+        pinch.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        addGestureRecognizer(pinch)
         // The pointer: the Mac's arrow, white with a dark edge, its tip at the point.
         let path = UIBezierPath()
         path.move(to: .zero)
@@ -127,6 +130,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         cursor = CGPoint(x: min(max(p.x, 0), screen.width - 1), y: min(max(p.y, 0), screen.height - 1))
         arrow.isHidden = false
         placeArrow()
+        if trackpad { followPointer() }
     }
 
     private func pointerEvent(_ type: Int32, clicks: Int32 = 1, flags: UInt = 0) {
@@ -142,7 +146,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     /// Finger movement in this view to the pointer's: as far on the screen as the finger went, a little more.
     private func pointerDelta(_ d: CGPoint) -> CGPoint {
-        let s = 1.6 / max(fit, 0.01)
+        let s = 1.6 / max(shown, 0.01)
         return CGPoint(x: d.x * s, y: -d.y * s) // the Mac's y runs up
     }
 
@@ -174,7 +178,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let t = g.translation(in: self)
         let phase: Int32 = g.state == .began ? 1 : (g.state == .ended || g.state == .cancelled) ? 8 : 4
         if g.state == .began { lastPadScroll = .zero }
-        let s = max(fit, 0.01)
+        let s = max(shown, 0.01)
         henge_tl_app_scroll(cursor.x, cursor.y, (t.x - lastPadScroll.x) / s, (t.y - lastPadScroll.y) / s, phase)
         lastPadScroll = t
     }
@@ -209,16 +213,70 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     private var fit: CGFloat { min(bounds.width / max(screen.width, 1), bounds.height / max(screen.height, 1)) }
 
+    /// Pinch zoom (1x: the whole screen fits) and where the zoomed screen is moved to (from centred, view points).
+    private var zoom: CGFloat = 1
+    private var offset = CGPoint.zero
+    private var shown: CGFloat { fit * zoom }
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        placeStage()
+    }
+
+    /// The screen at the zoom, centred where it is smaller than the view, else moved by the offset but always
+    /// covering the view.
+    private func placeStage() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let s = fit
+        let s = shown, w = screen.width * s, h = screen.height * s
+        var x = (bounds.width - w) / 2 + offset.x, y = (bounds.height - h) / 2 + offset.y
+        x = w > bounds.width ? min(0, max(bounds.width - w, x)) : (bounds.width - w) / 2
+        y = h > bounds.height ? min(0, max(bounds.height - h, y)) : (bounds.height - h) / 2
+        offset = CGPoint(x: x - (bounds.width - w) / 2, y: y - (bounds.height - h) / 2)
         stage.bounds = CGRect(origin: .zero, size: screen)
         stage.transform = CATransform3DMakeScale(s, s, 1)
-        stage.position = CGPoint(x: (bounds.width - screen.width * s) / 2, y: (bounds.height - screen.height * s) / 2)
+        stage.position = CGPoint(x: x, y: y)
         CATransaction.commit()
         placeArrow()
+    }
+
+    /// Two fingers pinching zoom in and out about the point between them, which stays under them (moving them
+    /// moves the zoomed screen).
+    private var pinchAnchor = CGPoint.zero
+    @objc private func pinched(_ g: UIPinchGestureRecognizer) {
+        let c = g.location(in: self)
+        switch g.state {
+        case .began:
+            pinchAnchor = mac(c)
+        case .changed:
+            zoom = min(max(zoom * g.scale, 1), 4)
+            g.scale = 1
+            placeStage()
+            let now = layer.convert(pinchAnchor, from: stage)
+            offset.x += c.x - now.x
+            offset.y += c.y - now.y
+            placeStage()
+        case .ended, .cancelled:
+            if zoom < 1.05 {
+                zoom = 1
+                offset = .zero
+                placeStage()
+            }
+        default: break
+        }
+    }
+
+    /// Zoomed in, the screen moves to keep the pointer in view.
+    private func followPointer() {
+        guard zoom > 1 else { return }
+        let v = layer.convert(cursor, from: stage), m: CGFloat = 36
+        var d = CGPoint.zero
+        if v.x < m { d.x = m - v.x } else if v.x > bounds.width - m { d.x = bounds.width - m - v.x }
+        if v.y < m { d.y = m - v.y } else if v.y > bounds.height - m { d.y = bounds.height - m - v.y }
+        guard d != .zero else { return }
+        offset.x += d.x
+        offset.y += d.y
+        placeStage()
     }
 
     /// Puts every window the app shows at its place, back to front.
@@ -270,6 +328,26 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         reloadInputViews()
     }
 
+    /// Above the iOS keyboard, the Mac's keys it lacks: esc, tab, the modifiers (held for the next key) and arrows.
+    let sticky = MacStickyKeys()
+    private lazy var keyRow: UIHostingController<MacKeyRow> = {
+        let host = UIHostingController(rootView: MacKeyRow(sticky: sticky, press: { [weak self] code, chars in
+            self?.typeSpecial(code, chars)
+        }, hide: { [weak self] in self?.toggleKeyboard() }))
+        host.sizingOptions = []
+        host.view.backgroundColor = .clear
+        host.view.frame = CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 50)
+        host.view.autoresizingMask = .flexibleWidth
+        return host
+    }()
+    override var inputAccessoryView: UIView? { softKeyboard ? keyRow.view : nil }
+
+    /// A key of the row (esc, tab, an arrow), with the modifiers held for it.
+    func typeSpecial(_ code: UInt16, _ chars: String) {
+        key(code, chars, flags: sticky.flags)
+        sticky.clear()
+    }
+
     @objc private func doubleTapped(_ g: UITapGestureRecognizer) {
         let p = g.location(in: self)
         mouse(1, p, clicks: 1)
@@ -293,7 +371,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let t = g.translation(in: self), p = mac(g.location(in: self))
         let phase: Int32 = g.state == .began ? 1 : (g.state == .ended || g.state == .cancelled) ? 8 : 4
         if g.state == .began { lastScroll = .zero }
-        let s = max(fit, 0.01)
+        let s = max(shown, 0.01)
         henge_tl_app_scroll(p.x, p.y, (t.x - lastScroll.x) / s, (t.y - lastScroll.y) / s, phase)
         lastScroll = t
     }
@@ -334,15 +412,25 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     var hasText: Bool { true }
 
     func insertText(_ text: String) {
+        let held = sticky.flags
         for ch in text {
-            let s = String(ch)
-            if s == "\n" { key(36, "\r"); continue }
+            var s = String(ch)
+            if s == "\n" { key(36, "\r", flags: held); continue }
             let (code, shift) = MacKeys.code(for: ch)
-            key(code, s, flags: shift ? 1 << 17 : 0)
+            var flags = held | (shift ? 1 << 17 : 0)
+            // With Command or Control held the key's plain character, as AppKit's key equivalents expect (⌘L, ⌃A);
+            // Shift held from the row makes a letter a capital.
+            if held & (1 << 20 | 1 << 18) != 0 { s = s.lowercased() }
+            else if held & (1 << 17) != 0 { s = s.uppercased(); flags |= 1 << 17 }
+            key(code, s, flags: flags)
         }
+        sticky.clear()
     }
 
-    func deleteBackward() { key(51, "\u{7f}") }
+    func deleteBackward() {
+        key(51, "\u{7f}", flags: sticky.flags)
+        sticky.clear()
+    }
 
     private func key(_ code: UInt16, _ chars: String, flags: UInt = 0) {
         chars.withCString { c in
@@ -372,6 +460,75 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) { pressesEnded(presses, with: event) }
+}
+
+/// Modifiers tapped on the key row: held for the next key, then let go (AppKit's flag bits).
+final class MacStickyKeys: ObservableObject {
+    @Published private(set) var flags: UInt = 0
+    func toggle(_ flag: UInt) { flags ^= flag }
+    func clear() { if flags != 0 { flags = 0 } }
+}
+
+/// The row over the iOS keyboard on a Mac app's screen.
+struct MacKeyRow: View {
+    @ObservedObject var sticky: MacStickyKeys
+    let press: (UInt16, String) -> Void
+    let hide: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            key("esc", 53, "\u{1b}")
+            key("tab", 48, "\t")
+            modifier("⌃", 1 << 18, "Control")
+            modifier("⌥", 1 << 19, "Option")
+            modifier("⇧", 1 << 17, "Shift")
+            modifier("⌘", 1 << 20, "Command")
+            key("←", 123, "\u{F702}")
+            key("↑", 126, "\u{F700}")
+            key("↓", 125, "\u{F701}")
+            key("→", 124, "\u{F703}")
+            Button(action: hide) {
+                Image(systemName: "keyboard.chevron.compact.down")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Desk.text)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Desk.raised, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .accessibilityLabel("Hide keyboard")
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .frame(height: 50)
+    }
+
+    private func key(_ label: String, _ code: UInt16, _ chars: String) -> some View {
+        Button {
+            press(code, chars)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            Text(label)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Desk.text)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Desk.raised, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .accessibilityLabel(label)
+    }
+
+    private func modifier(_ symbol: String, _ flag: UInt, _ name: String) -> some View {
+        let on = sticky.flags & flag != 0
+        return Button {
+            sticky.toggle(flag)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            Text(symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(on ? Color.white : Desk.text)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(on ? Desk.accent : Desk.raised, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .accessibilityLabel(name)
+    }
 }
 
 /// The Mac's key codes (Carbon's kVK_ values) for what the iOS keyboard types.
@@ -455,6 +612,60 @@ struct MacScreenView: UIViewRepresentable {
     func updateUIView(_ v: MacScreenUIView, context: Context) { v.refresh() }
 }
 
+/// The app's menu bar menus (a Mac app's menu bar has no place on the phone), as an iOS menu: built afresh each time
+/// it opens, so items are enabled, ticked and filled in as the app has them then.
+struct MacMenuButton: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIButton {
+        var c = UIButton.Configuration.plain()
+        c.image = UIImage(systemName: "menubar.rectangle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .medium))
+        c.baseForegroundColor = UIColor.white.withAlphaComponent(0.9)
+        c.background.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        c.background.cornerRadius = 19
+        c.contentInsets = .zero
+        let b = UIButton(configuration: c)
+        b.showsMenuAsPrimaryAction = true
+        b.menu = UIMenu(children: [UIDeferredMenuElement.uncached { done in done(MacMenuButton.elements()) }])
+        return b
+    }
+
+    func updateUIView(_ b: UIButton, context: Context) {}
+
+    static func elements() -> [UIMenuElement] {
+        guard let raw = henge_tl_app_main_menu(),
+              let items = Unmanaged<NSArray>.fromOpaque(raw).takeRetainedValue() as? [[String: Any]], !items.isEmpty else {
+            return [UIAction(title: "This app has no menus", attributes: .disabled) { _ in }]
+        }
+        return build(items)
+    }
+
+    /// Items as iOS menu elements; a Mac menu's separators become iOS's inline groups.
+    private static func build(_ items: [[String: Any]]) -> [UIMenuElement] {
+        var groups: [[UIMenuElement]] = [[]]
+        for it in items {
+            if it["separator"] as? Bool == true {
+                groups.append([])
+                continue
+            }
+            let title = it["title"] as? String ?? ""
+            let path = (it["path"] as? [NSNumber] ?? []).map { Int32(truncating: $0) }
+            if let kids = it["children"] as? [[String: Any]] {
+                groups[groups.count - 1].append(UIMenu(title: title, children: build(kids)))
+                continue
+            }
+            let enabled = it["enabled"] as? Bool ?? true
+            let state = it["state"] as? Int ?? 0
+            let a = UIAction(title: title, attributes: enabled ? [] : .disabled,
+                             state: state > 0 ? .on : state < 0 ? .mixed : .off) { _ in
+                path.withUnsafeBufferPointer { henge_tl_app_menu_choose($0.baseAddress, Int32(path.count)) }
+            }
+            groups[groups.count - 1].append(a)
+        }
+        let filled = groups.filter { !$0.isEmpty }
+        if filled.count == 1 { return filled[0] }
+        return filled.map { UIMenu(title: "", options: .displayInline, children: $0) }
+    }
+}
+
 /// Where Henge's AppKit's "a window changed" lands (a C callback, on the main thread).
 final class MacScreenHub {
     static let shared = MacScreenHub()
@@ -492,6 +703,7 @@ struct MacAppScreen: View {
                         .font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.9))
                         .frame(width: 38, height: 38).background(.black.opacity(0.45), in: Circle())
                 }
+                MacMenuButton().frame(width: 38, height: 38)
                 Button { MacScreenHub.shared.view?.toggleKeyboard() } label: {
                     Image(systemName: "keyboard").font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.9))
                         .frame(width: 38, height: 38).background(.black.opacity(0.45), in: Circle())

@@ -48,9 +48,47 @@ struct JITAdviceTests {
             precondition(pairing?.actions == [.pairAgain, .connectLocalDevVPN])
         }
 
-        // Advice: an error that is not about reaching the device gets no network advice.
+        // Advice: an error about the device's state gets its own plain explanation, on any network, and never the
+        // cellular advice.
+        let deviceErrors: [(String, JITDeviceProblem, String)] = [
+            ("idevice error: DeveloperModeNotEnabled", .developerModeOff, "Developer Mode"),
+            ("Developer mode is not enabled", .developerModeOff, "Settings"),
+            ("lockdownd: PasswordProtected", .locked, "Unlock"),
+            ("device locked", .locked, "Unlock"),
+            ("PairingDialogResponsePending", .trustPending, "trust"),
+            ("lockdownd error: InvalidHostID", .pairingRejected, "Pair again"),
+            ("UserDeniedPairing", .pairingRejected, "Pair again"),
+            ("Pairing file error: failed to read pairing file", .pairingFileUnreadable, "Pair again"),
+            ("heartbeat timeout", .slept, "screen on"),
+            ("The Developer Disk Image was not mounted after the mount operation completed.", .diskImage, "Reset Developer Disk Image"),
+            ("Developer Disk Image is not mounted", .diskImage, "Check setup"),
+            ("Failed to establish a debugserver connection to the target process.", .debugserver, "Check setup"),
+        ]
+        for (message, problem, phrase) in deviceErrors {
+            precondition(JITDeviceProblem(helperMessage: message) == problem, "\(message) should read as \(problem)")
+            for situation in [NetworkSituation.wifi, .cellularOnly] {
+                let advice = JITNetworkAdvice.advice(forHelperMessage: message, situation: situation)
+                precondition(advice?.message.contains(phrase) == true, "\(message) advice should mention \(phrase)")
+                precondition(advice?.message.contains("Cellular Data") == false)
+                precondition(advice?.message.contains("!") == false)
+            }
+        }
+        precondition(JITNetworkAdvice.advice(forHelperMessage: "InvalidHostID", situation: .wifi)?.actions == [.pairAgain])
+
+        // Advice: an error that is about neither the network nor the device is shown as it came.
+        precondition(JITNetworkAdvice.advice(forHelperMessage: "The JIT script threw an exception", situation: .wifi) == nil)
+        // A timeout is still a connection problem, not a device one.
+        precondition(JITDeviceProblem(helperMessage: "Timed out connecting to 10.7.0.1:49152") == nil)
+
+        // Advice: with a device address set instead of LocalDevVPN, an unreachable device points at that address,
+        // never at LocalDevVPN or cellular routing.
         for situation in [NetworkSituation.wifi, .cellularOnly] {
-            precondition(JITNetworkAdvice.advice(forHelperMessage: "Developer Disk Image is not mounted", situation: situation) == nil)
+            let byAddress = JITNetworkAdvice.advice(forHelperMessage: timeout, situation: situation, deviceAddress: "127.0.0.1")
+            precondition(byAddress?.message.contains("127.0.0.1") == true)
+            precondition(byAddress?.message.contains("Cellular Data") == false)
+            precondition(byAddress?.actions == [])
+            let refused = JITNetworkAdvice.advice(forHelperMessage: reset, situation: situation, deviceAddress: "127.0.0.1")
+            precondition(refused?.actions == [.pairAgain])
         }
 
         // Retry: the first connection over cellular is the one iOS misroutes, so try again shortly.

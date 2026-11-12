@@ -77,8 +77,9 @@ static void input_line(NSString *line) {
     } else if ([cmd isEqualToString:@"key"]) {
         NSString *c = f.count > 2 ? f[2] : @"";
         if ([c isEqualToString:@"RET"]) c = @"\r";
-        henge_tl_app_key(1, (unsigned short)a, c.UTF8String, 0);
-        henge_tl_app_key(0, (unsigned short)a, c.UTF8String, 0);
+        unsigned long flags = f.count > 3 ? strtoul(f[3].UTF8String, NULL, 0) : 0; /* key CODE CHARS FLAGS: 0x100000 is Command */
+        henge_tl_app_key(1, (unsigned short)a, c.UTF8String, flags);
+        henge_tl_app_key(0, (unsigned short)a, c.UTF8String, flags);
     } else if ([cmd isEqualToString:@"type"] && line.length > 5) {
         NSString *text = [line substringFromIndex:5];
         for (NSUInteger i = 0; i < text.length; i++) {
@@ -86,6 +87,25 @@ static void input_line(NSString *line) {
             henge_tl_app_key(1, 0, c, 0);
             henge_tl_app_key(0, 0, c, 0);
         }
+    } else if ([cmd isEqualToString:@"menus"]) { /* the menu bar's menus, as the screen's menu button gets them */
+        const void *raw = henge_tl_app_main_menu();
+        NSArray *items = raw ? (__bridge_transfer NSArray *)raw : nil;
+        __block void (^show)(NSArray *, int);
+        void (^__block __weak weak)(NSArray *, int);
+        weak = show = ^(NSArray *list, int depth) {
+            for (NSDictionary *d in list) {
+                if ([d[@"separator"] boolValue]) { fprintf(stderr, "test_tl_app: menu %*s----\n", depth * 2, ""); continue; }
+                fprintf(stderr, "test_tl_app: menu %*s%s%s%s [%s]\n", depth * 2, "", [d[@"title"] UTF8String], [d[@"enabled"] boolValue] ? "" : " (off)",
+                        [d[@"state"] intValue] ? " (on)" : "", [[d[@"path"] componentsJoinedByString:@"."] UTF8String]);
+                if (d[@"children"] && depth < 1) weak(d[@"children"], depth + 1);
+            }
+        };
+        show(items, 0);
+    } else if ([cmd isEqualToString:@"choose"] && f.count > 1) { /* choose 2.5: an item of the menu bar's menus */
+        NSArray<NSString *> *parts = [f[1] componentsSeparatedByString:@"."];
+        int path[8], n = 0;
+        for (NSString *p in parts) if (n < 8) path[n++] = p.intValue;
+        henge_tl_app_menu_choose(path, n);
     } else fprintf(stderr, "test_tl_app: unknown input '%s'\n", line.UTF8String);
 }
 

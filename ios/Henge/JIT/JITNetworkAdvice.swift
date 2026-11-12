@@ -63,9 +63,88 @@ enum JITConnectionProblem: Equatable {
     }
 }
 
+/// A helper failure that is about this device's state, not the network: StikJIT passes the device's own error names
+/// (DeveloperModeNotEnabled, InvalidHostID, ...) or its own sentences through, which mean nothing to most people.
+enum JITDeviceProblem: Equatable {
+    case developerModeOff
+    case locked
+    case trustPending
+    /// The device does not accept this pairing (made for another device, replaced by a newer one, or refused).
+    case pairingRejected
+    /// The pairing file itself could not be read.
+    case pairingFileUnreadable
+    case diskImage
+    /// The connection dropped because the device slept or the screen locked.
+    case slept
+    case debugserver
+
+    init?(helperMessage: String) {
+        let text = helperMessage.lowercased()
+        let has = { (needles: [String]) in needles.contains(where: text.contains) }
+        if has(["developer mode is not enabled", "developermodenotenabled"]) {
+            self = .developerModeOff
+        } else if has(["passwordprotected", "device locked", "devicelocked"]) {
+            self = .locked
+        } else if has(["pairing trust dialog pending", "pairingdialogresponsepending"]) {
+            self = .trustPending
+        } else if has(["invalidhostid", "user denied pairing", "userdeniedpairing", "device does not have pairing file"]) {
+            self = .pairingRejected
+        } else if has(["failed to read pairing file", "pairing file error", "not a remote pairing file"]) {
+            self = .pairingFileUnreadable
+        } else if has(["heartbeat timeout", "device went to sleep"]) {
+            self = .slept
+        } else if has(["disk image", "image not mounted", "imagenotmounted", "ddinotmounted", "ddidownload", "ddifilesmissing"]) {
+            self = .diskImage
+        } else if has(["debugserver connection"]) {
+            self = .debugserver
+        } else {
+            return nil
+        }
+    }
+
+    var advice: JITAdvice {
+        switch self {
+        case .developerModeOff:
+            return JITAdvice(message: "Developer Mode is off. Turn it on in Settings › Privacy & Security › Developer Mode, "
+                                    + "let the device restart and confirm, then try again.", actions: [])
+        case .locked:
+            return JITAdvice(message: "This device was locked. Unlock it, keep Henge open, then try again.", actions: [])
+        case .trustPending:
+            return JITAdvice(message: "This device is waiting for you to trust the pairing. Answer the prompt, "
+                                    + "then try again.", actions: [])
+        case .pairingRejected:
+            return JITAdvice(message: "This device no longer accepts Henge's pairing. That happens after pairing "
+                                    + "another tool, erasing the device, or using a pairing file made for a different device. "
+                                    + "Pair again.", actions: [.pairAgain])
+        case .pairingFileUnreadable:
+            return JITAdvice(message: "Henge's pairing file could not be read. Pair again, or import a fresh pairing file.",
+                             actions: [.pairAgain])
+        case .diskImage:
+            return JITAdvice(message: "The Developer Disk Image could not be downloaded or mounted. Check that this device "
+                                    + "is online, tap Reset Developer Disk Image, then Check setup again.", actions: [])
+        case .slept:
+            return JITAdvice(message: "The connection dropped when this device slept or locked. Keep the screen on with "
+                                    + "Henge open, then try again.", actions: [.connectLocalDevVPN])
+        case .debugserver:
+            return JITAdvice(message: "This device's debugging service did not accept the helper. This usually means the "
+                                    + "Developer Disk Image is not mounted: tap Check setup, then Enable JIT.", actions: [])
+        }
+    }
+}
+
 enum JITNetworkAdvice {
-    static func advice(forHelperMessage helperMessage: String, situation: NetworkSituation) -> JITAdvice? {
+    /// `deviceAddress` is the address set in Settings in place of LocalDevVPN's; nil when LocalDevVPN is used.
+    static func advice(forHelperMessage helperMessage: String, situation: NetworkSituation,
+                       deviceAddress: String? = nil) -> JITAdvice? {
+        if let device = JITDeviceProblem(helperMessage: helperMessage) { return device.advice }
         guard let problem = JITConnectionProblem(helperMessage: helperMessage) else { return nil }
+        if let deviceAddress {
+            return problem == .pairing
+                ? JITAdvice(message: "This device closed the connection at \(deviceAddress), which usually means it no longer "
+                                   + "accepts Henge's pairing. Pair again.", actions: [.pairAgain])
+                : JITAdvice(message: "Nothing answered at \(deviceAddress). Check the device address in Settings › JIT, "
+                                   + "or clear it to go through LocalDevVPN.", actions: [])
+        }
         if problem == .pairing {
             return JITAdvice(
                 message: "This device closed the connection, which usually means it no longer accepts "

@@ -84,6 +84,8 @@ HengeDualMapping henge_ios_jit_allocate(size_t bytes);
  * will ask for (tb-size).
  */
 HENGE_EXPORT bool henge_ios_jit_prewarm(size_t bytes);
+/* After a prewarm that no debugger answered, allow one more: a debugger traces the process now (the caller checks). */
+HENGE_EXPORT void henge_ios_jit_prewarm_allow_retry(void);
 /* The high address blocks held for a Mac app's large reservations (Chromium's allocators), handed out once into
    base[3]/bytes[3]: how many, 0 if none. */
 int henge_ios_take_high_room(void **base, size_t *bytes);

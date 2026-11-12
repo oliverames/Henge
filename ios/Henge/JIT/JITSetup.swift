@@ -76,6 +76,26 @@ enum JITPairingFileStore {
     }
 }
 
+/// Where the built-in helper reaches this device's RemotePairing service. Empty, the default, means LocalDevVPN's
+/// 10.7.0.1. Another address skips LocalDevVPN: this device's own address on a network that reaches its RemotePairing
+/// service, or a loopback address. StikJIT takes an IP address, not a name.
+enum JITDeviceAddress {
+    static let key = "henge.jit.deviceAddress"
+
+    /// The address in use, or nil for LocalDevVPN's. Text that is not an IP address is not used (Settings says so).
+    static var custom: String? {
+        let value = (UserDefaults.standard.string(forKey: key) ?? "").trimmingCharacters(in: .whitespaces)
+        return isValid(value) ? value : nil
+    }
+
+    /// Whether `text` is an IPv4 or IPv6 address, which is all StikJIT accepts.
+    static func isValid(_ text: String) -> Bool {
+        var v4 = in_addr()
+        var v6 = in6_addr()
+        return inet_pton(AF_INET, text, &v4) == 1 || inet_pton(AF_INET6, text, &v6) == 1
+    }
+}
+
 @MainActor
 final class JITCoordinator: ObservableObject {
     static let shared = JITCoordinator()
@@ -125,6 +145,9 @@ final class JITCoordinator: ObservableObject {
         if JITBootstrap.isJailbroken { return .jailbreak }
         if hasPairing && HengeBuiltInJIT.isAvailable { return .builtIn }
         if JITBootstrap.isStikDebugInstalled { return .stikDebug }
+        // Inside LiveContainer the stikjit:// query answers for LiveContainer's own Info.plist, so StikDebug can be
+        // there unseen; it is opened by URL, which works regardless. The built-in helper needs a setting there.
+        if LiveContainerHost.isHosting && !HengeBuiltInJIT.isAvailable { return .stikDebug }
         return .builtIn
     }
 
@@ -137,6 +160,14 @@ final class JITCoordinator: ObservableObject {
             ? "Henge will use its paired built-in helper."
             : "StikDebug, TrollStore and a jailbreak were not found, so Henge will use its built-in helper."
         }
+    }
+
+    /// The device address changed in Settings: the last setup check was for the old one.
+    func addressChanged() {
+        prepared = false
+        error = nil
+        advice = nil
+        connectionProblem = nil
     }
 
     func refreshPairingStatus() {
@@ -185,9 +216,9 @@ final class JITCoordinator: ObservableObject {
             log("JIT at launch is on, but built-in StikJIT is not available or not paired; skipped")
             return
         }
-        // The helper reaches this device through LocalDevVPN. When it is not connected, connect it first: LocalDevVPN
-        // connects and comes back (henge://), and the return to the foreground goes on above.
-        if LocalDevVPN.isInstalled, !LocalDevVPN.isConnected {
+        // The helper reaches this device through LocalDevVPN, unless a device address is set. When it is not connected,
+        // connect it first: LocalDevVPN connects and comes back (henge://), and the return to the foreground goes on above.
+        if JITDeviceAddress.custom == nil, LocalDevVPN.isInstalled, !LocalDevVPN.isConnected {
             log("JIT at launch: LocalDevVPN is not connected; opening it to connect")
             awaitingVPN = true
             LocalDevVPN.open()
@@ -326,9 +357,12 @@ final class JITCoordinator: ObservableObject {
         error = nil
         connectionProblem = nil
         advice = nil
-        if attempt == 1 { status = "Checking LocalDevVPN and the Developer Disk Image…" }
+        if attempt == 1 {
+            status = "Checking " + (JITDeviceAddress.custom.map { "\($0)" } ?? "LocalDevVPN") + " and the Developer Disk Image…"
+        }
         RemotePairingPortDiscovery.resolve { port in
-            HengeBuiltInJIT.send(.prepare(pairingData: pairing, rsdPort: port)) { [weak self] result in
+            HengeBuiltInJIT.send(.prepare(pairingData: pairing, rsdPort: port,
+                                          deviceAddress: JITDeviceAddress.custom)) { [weak self] result in
                 guard let self else { return }
                 switch result {
                 case .success(let response):
@@ -339,6 +373,7 @@ final class JITCoordinator: ObservableObject {
                     }
                     busy = false
                     txmPresent = response.txmPresent
+                    noteTXMAnswer(response.txmPresent)
                     prepared = response.success
                     status = response.success ? response.message : nil
                     error = response.success ? nil : helperFailure(response.message)
@@ -388,12 +423,15 @@ final class JITCoordinator: ObservableObject {
 
         RemotePairingPortDiscovery.resolve { port in
             HengeBuiltInJIT.send(
-                .enable(targetPID: getpid(), pairingData: pairing, scriptBase64: script, rsdPort: port),
+                .enable(targetPID: getpid(), pairingData: pairing, scriptBase64: script, rsdPort: port,
+                        deviceAddress: JITDeviceAddress.custom),
                 started: { [weak self] in
                     if attempt == 1 { self?.status = "Waiting for the helper to attach…" }
                     readiness = Self.waitForDebugger { attached in
                         finish(attached ? nil : "The helper did not attach within 90 seconds. "
-                                              + "Check that LocalDevVPN is connected, then try again.")
+                                              + (JITDeviceAddress.custom.map { "Check that \($0) reaches this device, " }
+                                                 ?? "Check that LocalDevVPN is connected, ")
+                                              + "then try again.")
                     }
                 },
                 completion: { [weak self] result in
@@ -419,6 +457,14 @@ final class JITCoordinator: ObservableObject {
                     }
                 })
         }
+    }
+
+    /// StikJIT reads TXM its own way. Log it when it disagrees with Henge's answer, so a wrong one shows in the log.
+    private func noteTXMAnswer(_ stikJIT: Bool?) {
+        guard let stikJIT, stikJIT != JITBootstrap.deviceEnforcesTXM else { return }
+        log("TXM: StikJIT says \(stikJIT ? "present" : "absent"), Henge assumed "
+            + "\(JITBootstrap.deviceEnforcesTXM ? "present" : "absent") (device tree: "
+            + "\(TXMDetection.fromDeviceTree.map { $0 ? "present" : "absent" } ?? "unreadable"))")
     }
 
     func resetDDI() {
@@ -456,14 +502,17 @@ final class JITCoordinator: ObservableObject {
     /// explanation for the network in use (the helper's own message is already in the log).
     private func helperFailure(_ message: String) -> String {
         connectionProblem = JITConnectionProblem(helperMessage: message)
-        advice = JITNetworkAdvice.advice(forHelperMessage: message, situation: networkSituation)
+        advice = JITNetworkAdvice.advice(forHelperMessage: message, situation: networkSituation,
+                                         deviceAddress: JITDeviceAddress.custom)
         return advice?.message ?? message
     }
 
     /// When the policy says the failure is worth another try, say so, wait, and call `retry` with the next attempt number.
     /// Returns false when it gives up, and the caller shows the advice instead.
     private func retryIfAdvised(helperMessage: String, attempt: Int, retry: @escaping (Int) -> Void) -> Bool {
-        guard let problem = JITConnectionProblem(helperMessage: helperMessage),
+        // The retries are for iOS sending LocalDevVPN's traffic over cellular; another address has no such problem.
+        guard JITDeviceAddress.custom == nil,
+              let problem = JITConnectionProblem(helperMessage: helperMessage),
               case .retry(let wait) = JITRetryPolicy.decision(situation: networkSituation, problem: problem, attempt: attempt)
         else { return false }
         status = JITRetryPolicy.statusText(nextAttempt: attempt + 1)
@@ -476,12 +525,14 @@ final class JITCoordinator: ObservableObject {
         return true
     }
 
-    /// Polls CS_DEBUGGED until it is set or `timeout` passes.
+    /// Polls until a debugger that can give the JIT region is there (JITBootstrap.debuggerUsable) or `timeout` passes.
+    /// Not CS_DEBUGGED alone: it stays set after a debugger lets go, so inside LiveContainer, whose launch with JIT
+    /// leaves it set, it would report an attach that has not happened yet.
     private static func waitForDebugger(timeout: TimeInterval = 90,
                                         completion: @escaping (Bool) -> Void) -> Timer {
         let deadline = Date().addingTimeInterval(timeout)
         let timer = Timer(timeInterval: 0.5, repeats: true) { timer in
-            if JITBootstrap.debuggedFlag {
+            if JITBootstrap.debuggerUsable {
                 timer.invalidate()
                 completion(true)
             } else if Date() >= deadline {
@@ -503,22 +554,49 @@ enum LocalDevVPN {
 
     static var isInstalled: Bool { UIApplication.shared.canOpenURL(URL(string: "localdevvpn://")!) }
 
-    /// Whether its tunnel is up: a tunnel interface that is up with an address in 10.7.0.0/16 (LocalDevVPN's own is
-    /// 10.7.1.1), the network it routes to reach this device at 10.7.0.1, StikJIT's default device address.
+    /// Whether connections to 10.7.0.1, StikJIT's default device address, go through LocalDevVPN's tunnel right now.
+    /// Asks the kernel's routing, not the interface list: a UDP socket connected to that address (which sends nothing)
+    /// gets the local address of the route's interface, and that interface must be a tunnel (utun). A tunnel that is up
+    /// while iOS routes the address elsewhere, over cellular say, counts as not connected.
     static var isConnected: Bool {
+        guard let local = localAddressRouting(to: "10.7.0.1") else { return false }
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let first = list else { return false }
         defer { freeifaddrs(list) }
         for p in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let ifa = p.pointee
-            guard (ifa.ifa_flags & UInt32(IFF_UP)) != 0, let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
-            let ip = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { UInt32(bigEndian: $0.pointee.sin_addr.s_addr) }
-            if ip >> 16 == 0x0a07, String(cString: ifa.ifa_name).hasPrefix("utun") {
-                HengeLog.log("jit", "LocalDevVPN tunnel on \(String(cString: ifa.ifa_name))")
-                return true
-            }
+            guard let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let ip = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr }
+            guard ip == local else { continue }
+            let name = String(cString: ifa.ifa_name)
+            HengeLog.log("jit", "10.7.0.1 routes through \(name)")
+            return name.hasPrefix("utun")
         }
         return false
+    }
+
+    /// The local IPv4 address the kernel would send from to reach `address`, or nil when there is no route.
+    private static func localAddressRouting(to address: String) -> in_addr_t? {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var remote = sockaddr_in()
+        remote.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        remote.sin_family = sa_family_t(AF_INET)
+        remote.sin_port = UInt16(49152).bigEndian
+        guard inet_pton(AF_INET, address, &remote.sin_addr) == 1 else { return nil }
+        let connected = withUnsafePointer(to: &remote) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+        var local = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &local) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        }
+        return named == 0 ? local.sin_addr.s_addr : nil
     }
     static var actionTitle: String { isInstalled ? "Connect LocalDevVPN" : "Get LocalDevVPN" }
 

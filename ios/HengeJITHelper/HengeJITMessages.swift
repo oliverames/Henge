@@ -22,16 +22,19 @@ struct HengeJITRequest: Codable, Sendable {
     /// The port the device is currently advertising for RemotePairing. iOS picks
     /// a new one when it boots; nil means StikJIT's default.
     let rsdPort: UInt16?
+    /// Where this device's RemotePairing service is reached. nil means StikJIT's default, LocalDevVPN's 10.7.0.1.
+    var deviceAddress: String? = nil
 
-    static func prepare(pairingData: Data, rsdPort: UInt16? = nil) -> HengeJITRequest {
+    static func prepare(pairingData: Data, rsdPort: UInt16? = nil, deviceAddress: String? = nil) -> HengeJITRequest {
         HengeJITRequest(operation: .prepare, targetPID: nil,
-                       pairingData: pairingData, scriptBase64: nil, rsdPort: rsdPort)
+                       pairingData: pairingData, scriptBase64: nil, rsdPort: rsdPort, deviceAddress: deviceAddress)
     }
 
     static func enable(targetPID: Int32, pairingData: Data,
-                       scriptBase64: String, rsdPort: UInt16? = nil) -> HengeJITRequest {
+                       scriptBase64: String, rsdPort: UInt16? = nil, deviceAddress: String? = nil) -> HengeJITRequest {
         HengeJITRequest(operation: .enable, targetPID: targetPID,
-                       pairingData: pairingData, scriptBase64: scriptBase64, rsdPort: rsdPort)
+                       pairingData: pairingData, scriptBase64: scriptBase64, rsdPort: rsdPort,
+                       deviceAddress: deviceAddress)
     }
 
     static var resetDDI: HengeJITRequest {
