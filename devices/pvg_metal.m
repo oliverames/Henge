@@ -412,9 +412,13 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
 - (BOOL)hadLookupFailure { return failure != nil; }
 - (NSString *)firstFailureReason { return failure; }
 /* As Apple's host does: ref 0 is no function (not a failure), and only an object-list entry of type 6 is one. Any other
-   object handed to Metal as a function is read as one by the GPU driver. */
+   object handed to Metal as a function is read as one by the GPU driver. A compute pipeline still gets the stand-in, as
+   Metal's deserializer aborts on a nil compute function. */
 - (id)functionWithFunctionRef:(unsigned long long)ref {
-    if (!ref) return nil;
+    if (!ref) {
+        if (standIn && !failure) failure = @"function ref 0 in a compute pipeline";
+        return standIn;
+    }
     HvObject *o = [replay object:(uint32_t)ref task:task];
     if (!o || !o->object || (o->entry[0] & 0xff) != OBJ_FUNCTION) {
         if (!failure) failure = o && o->object ? [NSString stringWithFormat:@"function %llu is an object of type %u", ref, o->entry[0] & 0xff]
