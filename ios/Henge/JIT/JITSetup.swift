@@ -145,6 +145,9 @@ final class JITCoordinator: ObservableObject {
         if JITBootstrap.isJailbroken { return .jailbreak }
         if hasPairing && HengeBuiltInJIT.isAvailable { return .builtIn }
         if JITBootstrap.isStikDebugInstalled { return .stikDebug }
+        // Inside LiveContainer the stikjit:// query answers for LiveContainer's own Info.plist, so StikDebug can be
+        // there unseen; it is opened by URL, which works regardless. The built-in helper needs a setting there.
+        if LiveContainerHost.isHosting && !HengeBuiltInJIT.isAvailable { return .stikDebug }
         return .builtIn
     }
 
@@ -522,12 +525,14 @@ final class JITCoordinator: ObservableObject {
         return true
     }
 
-    /// Polls CS_DEBUGGED until it is set or `timeout` passes.
+    /// Polls until a debugger that can give the JIT region is there (JITBootstrap.debuggerUsable) or `timeout` passes.
+    /// Not CS_DEBUGGED alone: it stays set after a debugger lets go, so inside LiveContainer, whose launch with JIT
+    /// leaves it set, it would report an attach that has not happened yet.
     private static func waitForDebugger(timeout: TimeInterval = 90,
                                         completion: @escaping (Bool) -> Void) -> Timer {
         let deadline = Date().addingTimeInterval(timeout)
         let timer = Timer(timeInterval: 0.5, repeats: true) { timer in
-            if JITBootstrap.debuggedFlag {
+            if JITBootstrap.debuggerUsable {
                 timer.invalidate()
                 completion(true)
             } else if Date() >= deadline {

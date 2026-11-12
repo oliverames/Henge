@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// LocalDevVPN and enabling. StikDebug has its own short page. Presented from
 /// onboarding, Settings › JIT, and whenever Start finds JIT not set up.
 struct JITSetupFlow: View {
-    enum Step: Hashable { case pairOnDevice, importFile, connect, enable, stikDebug, trollStore, jailbreak }
+    enum Step: Hashable { case pairOnDevice, importFile, connect, enable, stikDebug, trollStore, jailbreak, liveContainer }
 
     @ObservedObject private var jit = JITCoordinator.shared
     @ObservedObject private var pairing = OnDevicePairing.shared
@@ -31,6 +31,7 @@ struct JITSetupFlow: View {
                     case .stikDebug: stikDebug
                     case .trollStore: trollStore
                     case .jailbreak: jailbreak
+                    case .liveContainer: liveContainer
                     }
                 }
         }
@@ -68,6 +69,13 @@ struct JITSetupFlow: View {
              subtitle: "A Mac needs memory it can write and then run, which on iOS only an attached "
                      + "debugger can grant. Choose how your \(device) gets one.") {
             VStack(spacing: 10) {
+                if LiveContainerHost.isHosting {
+                    way("Inside LiveContainer", symbol: "shippingbox",
+                        detail: LiveContainerHost.runsHelperProcesses
+                            ? "Helper Process Support is on, so the built-in helper works here."
+                            : "Turn on Helper Process Support, or launch with Henge's JIT script.",
+                        done: LiveContainerHost.runsHelperProcesses) { path.append(.liveContainer) }
+                }
                 let builtIn = HengeBuiltInJIT.unavailableReason
                 way("Pair on this \(device)", symbol: "iphone.radiowaves.left.and.right",
                     detail: builtIn ?? (!OnDevicePairing.isSupported ? "Needs iOS 27 or later."
@@ -296,7 +304,7 @@ struct JITSetupFlow: View {
 
     // MARK: Enable
 
-    private var attached: Bool { jit.attachGeneration > 0 || JITBootstrap.debuggedFlag }
+    private var attached: Bool { jit.attachGeneration > 0 || JITBootstrap.debuggerUsable }
 
     private var enable: some View {
         page(symbol: "bolt.badge.checkmark", title: "Turn on JIT",
@@ -379,6 +387,52 @@ struct JITSetupFlow: View {
                 close()
             }
             .buttonStyle(PrimaryButtonStyle())
+        }
+    }
+
+    // MARK: LiveContainer
+
+    private var liveContainer: some View {
+        page(symbol: "shippingbox", title: "Inside LiveContainer",
+             subtitle: "LiveContainer runs Henge as a guest app. Henge's built-in helper works there when LiveContainer "
+                     + "starts it, and StikDebug works with Henge's own JIT script.") {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Built-in helper").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
+                point(1, "Use a LiveContainer nightly build that has **Helper Process Support**.",
+                      done: LiveContainerHost.runsHelperProcesses)
+                point(2, "In LiveContainer, open Henge's settings and turn on **Helper Process Support**. Then open Henge again.",
+                      done: LiveContainerHost.runsHelperProcesses)
+                point(3, "Pair this \(device) or import a pairing file, and connect LocalDevVPN, as outside LiveContainer.",
+                      done: jit.hasPairing)
+            }
+            .padding(16).hengeCard()
+            VStack(alignment: .leading, spacing: 14) {
+                Text("StikDebug at launch").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
+                point(1, "Save Henge's JIT script with the button below, to Files.")
+                point(2, "In Henge's settings in LiveContainer, turn on **Launch with JIT** and choose that script.")
+                point(3, "Open Henge from LiveContainer. StikDebug attaches with the script and Henge takes its JIT "
+                       + "memory as it opens. Without the script, open Henge without JIT and tap **Turn On JIT** instead.")
+                if let script = JITBootstrap.scriptFileURL {
+                    ShareLink(item: script) { Label("Save Henge's JIT script", systemImage: "square.and.arrow.up") }
+                        .font(.system(size: 14, weight: .semibold))
+                }
+            }
+            .padding(16).hengeCard()
+        } actions: {
+            if LiveContainerHost.runsHelperProcesses {
+                Button("Continue") {
+                    jit.method = .builtIn
+                    path.append(jit.hasPairing ? .connect : (OnDevicePairing.isSupported ? .pairOnDevice : .importFile))
+                }
+                .buttonStyle(PrimaryButtonStyle())
+            } else {
+                Button("Use StikDebug") {
+                    jit.method = .stikDebug
+                    HengeLog.log("ui", "JIT method set to StikDebug (LiveContainer)")
+                    close()
+                }
+                .buttonStyle(PrimaryButtonStyle())
+            }
         }
     }
 
