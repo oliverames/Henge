@@ -91,6 +91,23 @@ void hv_jit_finish(HvJitRegion *region, uint32_t *start, size_t words) {
     if (start && words) sys_icache_invalidate(start, words * sizeof(uint32_t));
 }
 
+void hv_jit_finish_words(HvJitRegion *region, uint32_t *const *words, size_t n) {
+    (void)region;
+#if TARGET_OS_OSX
+    if (!region->rw_diff) pthread_jit_write_protect_np(1);
+#endif
+    __asm__ volatile("dsb ish" ::: "memory");
+    uintptr_t last = 0;
+    for (size_t k = 0; k < n; k++) {
+        uintptr_t a = (uintptr_t)words[k] & ~(uintptr_t)63;
+        if (a == last) continue;
+        last = a;
+        __asm__ volatile("ic ivau, %0" ::"r"(a) : "memory");
+        if (k % 20 == 19) __asm__ volatile("dsb ish" ::: "memory"); /* as sys_icache_invalidate does, for the CPUs that need it */
+    }
+    __asm__ volatile("dsb ish\n\tisb" ::: "memory");
+}
+
 void hv_jit_poison(HvJitRegion *region, uint32_t *start, size_t words) {
 #if TARGET_OS_OSX
     if (!region->rw_diff) pthread_jit_write_protect_np(0); /* MAP_JIT: a direct write faults until this */

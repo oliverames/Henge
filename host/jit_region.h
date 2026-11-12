@@ -51,6 +51,9 @@ void hv_jit_finish2(HvJitRegion *region, uint32_t *a, size_t na, uint32_t *b, si
    branch takes the way the old one went (chaining: the exit's stub, which follows the slot) until its cache lets go. */
 void hv_jit_finish_branch(HvJitRegion *region, uint32_t *word);
 
+/* After rewriting single words with hv_jit_write while no CPU runs translated code: one barrier for all of them, not
+   one per word (an eviction can undo hundreds of thousands of chained exits). */
+void hv_jit_finish_words(HvJitRegion *region, uint32_t *const *words, size_t n);
 /* Debugging (HV_JIT_POISON): zero `words` instructions at start (an executable address), so running them faults. */
 void hv_jit_poison(HvJitRegion *region, uint32_t *start, size_t words);
 
