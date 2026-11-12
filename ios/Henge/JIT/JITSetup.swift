@@ -573,7 +573,7 @@ enum LocalDevVPN {
         guard inet_pton(AF_INET, address, &remote.sin_addr) == 1 else { return nil }
         let connected = withUnsafePointer(to: &remote) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         guard connected == 0 else { return nil }
