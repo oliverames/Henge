@@ -90,12 +90,13 @@ int main(void) {
         }
         printf("with a 1 KB JIT region: %llu flushes\n", (unsigned long long)small.stats.block_flushes);
     }
-    /* Again with the code cache a ring of small segments, the programs' pages invalidated after every round so
-       they are translated again and the ring comes round many times: segments taken back in the middle of
-       programs, with exits chained into their blocks from blocks that stay. */
+    /* Again with the code cache a ring of two 32 KB segments (whatever HV_JIT_SEGMENTS says), the programs' pages
+       invalidated after every round so they are translated again and the ring comes round about once a round:
+       segments taken back in the middle of programs, with exits chained into their blocks from blocks that stay. */
     {
         static HvMachine ring;
-        if (hv_machine_init(&ring, 256 << 10) != 0) return 1;
+        if (hv_machine_init(&ring, 64 << 10) != 0) return 1;
+        hv_jit_ring(&ring.jit, 2);
         hv_machine_add_ram(&ring, (uint64_t)(uintptr_t)jit_programs_begin, jit_programs_finish - jit_programs_begin,
                            (void *)jit_programs_begin, 1);
         hv_machine_add_ram(&ring, (uint64_t)(uintptr_t)stack, 65536, stack, 0);
@@ -114,7 +115,7 @@ int main(void) {
             uint64_t from = (uint64_t)(uintptr_t)jit_programs_begin & ~16383ull, to = (uint64_t)(uintptr_t)jit_programs_finish;
             for (uint64_t pa = from; pa < to; pa += 16384) hv_invalidate_code(&ring, pa < (uint64_t)(uintptr_t)jit_programs_begin ? (uint64_t)(uintptr_t)jit_programs_begin : pa);
         }
-        printf("with a 256 KB ring of %u segments: %llu evictions (%llu blocks dropped, %llu exits unchained), %llu full flushes\n",
+        printf("with a 64 KB ring of %u segments: %llu evictions (%llu blocks dropped, %llu exits unchained), %llu full flushes\n",
                ring.jit.nseg, (unsigned long long)ring.stats.evictions, (unsigned long long)ring.stats.evict_blocks,
                (unsigned long long)ring.stats.evict_unchained, (unsigned long long)ring.stats.block_flushes);
         if (!ring.stats.evictions || ring.stats.block_flushes) {
