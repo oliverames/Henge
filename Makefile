@@ -264,3 +264,11 @@ $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice
 test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
+
+# Which RemotePairing result the JIT setup takes: this device's own (loopback) over another device's on the network.
+$(B)/test_remote_pairing_choice: ios/HengeJITHelper/RemotePairingChoice.swift tests/test_remote_pairing_choice.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-remote-pairing-choice: $(B)/test_remote_pairing_choice
+	$(B)/test_remote_pairing_choice
+.PHONY: test-remote-pairing-choice
