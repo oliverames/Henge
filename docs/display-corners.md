@@ -46,3 +46,4 @@ osascript -l JavaScript -e 'ObjC.import("AppKit"); var s=$.NSScreen.mainScreen; 
 
 - The CoreUI lookup disassembly is in [duo/coreui-shape-lookup.md](duo/coreui-shape-lookup.md), and the shipped Eraserhead SVGs are in [duo/display-shapes/](duo/display-shapes/).
 - The 2026-11-12 Duo test results are in [duo/test-results-2026-11-12.md](duo/test-results-2026-11-12.md). That file covers the code cache, shader cache, stale panic, Safari, JIT and mouse results, plus the list of tests that did not run.
+- The trace of corner radius readers is in [duo/corner-radius-readers.md](duo/corner-radius-readers.md). Its bottom line: no guest-visible input moves the menu bar away from a rounded corner. `display-corner-radius` is read only by MobileGestalt (`DeviceCornerRadius`, an 8-byte `/product` value, u32/u32), and only UIKit uses it. Menu bar insets come from the notch and a pixel-density table of at most 12 pt, so the remaining fix is host-side.
