@@ -488,7 +488,7 @@ int main(void) {
         c4.tcr_el1 = 17 | 2u << 14 | 25u << 16 | 1u << 30 | 1u << 23 | 5ull << 32;
         uint64_t ra = alloc_table(), rb = alloc_table();
         const uint64_t leaf = PT_PA + PT_SIZE - 0x4000; /* RAM, so the TLB takes it */
-        const uint64_t shared = 0x180004000ull, other = 0x182004000ull, priv = 0x100004000ull;
+        const uint64_t shared = 0x180004000ull, other = 0x182004000ull, priv = 0x100008000ull; /* TLB slots 1, 2049, 2 */
         map(ra, 14, 47, shared, 3, leaf | PAGE | AF | AP(1), 0);
         map(ra, 14, 47, other, 3, leaf | PAGE | AF | AP(1), 0);
         map(ra, 14, 47, priv, 3, leaf | PAGE | AF | AP(1), 0);
