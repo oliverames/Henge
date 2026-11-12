@@ -200,6 +200,21 @@ static void test_bdif(HvDisk *root, HvDisk *aux) {
         check(which ? "bdif aux data" : "bdif root data", memcmp(ram(data), want, 1024), 0);
     }
 
+    /* macOS 27.2's restore iBSS writes the vPMU SRAM header to aux sector 32768 and panics
+       (70b7ca7d373f8bb:144) if the write fails. The write lands past the aux file's 16 KB header. */
+    static const uint8_t vpmu[10] = {0x55, 0x4d, 0x50, 0x76, 1, 0, 0, 0, 4, 0};
+    memset(ram(data), 0, 512);
+    memcpy(ram(data), vpmu, sizeof vpmu);
+    a = data; l = 512; f = 0x00010001; memcpy(r + 16, &a, 8); memcpy(r + 24, &l, 4); memcpy(r + 28, &f, 4);
+    memcpy(ram(req), r, 48);
+    ram(ret)[0] = 0xee;
+    wr64(VMAPPLE_BDOOR + 0x10000 + 0x408, req);
+    uint8_t got[sizeof vpmu] = {0};
+    check("bdif aux write ok", ram(ret)[0], 0);
+    check("bdif aux write lands after the file header", pread(aux->fd, got, sizeof got, 16384 + 3 * 512), (ssize_t)sizeof got);
+    check("bdif aux write data", memcmp(got, vpmu, sizeof vpmu), 0);
+    f = 0x00030001; memcpy(r + 28, &f, 4);
+
     /* The 27.3 upgrade firmware reads this asset in one request. */
     const uint32_t large_length = 285216768;
     const uint64_t disk_offset = 4ull << 20;

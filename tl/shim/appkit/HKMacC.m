@@ -77,6 +77,7 @@ HK_FN(OSStatus, DisableSecureEventInput, (void)) { return 0; }
 HK_FN(uint32_t, GetCurrentKeyModifiers, (void)) { return 0; }
 HK_FN(uint8_t, LMGetKbdType, (void)) { return 40; /* an ANSI keyboard */ }
 HK_FN(uint8_t, LMGetKbdLast, (void)) { return 40; }
+HK_FN(uint32_t, KBGetLayoutType, (int16_t keyboardType)) { return 'ANSI'; /* kKeyboardANSI */ }
 HK_FN(OSStatus, TSMSetDocumentProperty, (void *doc, uint32_t tag, uint32_t size, void *data)) { return 0; }
 HK_FN(OSStatus, TSMRemoveDocumentProperty, (void *doc, uint32_t tag)) { return 0; }
 

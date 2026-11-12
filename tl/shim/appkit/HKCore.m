@@ -493,12 +493,20 @@ static NSRect rect_of(NSPoint a, NSPoint b) {
 
 - (NSRect)visibleRect { return _bounds; }
 
+/* A view whose layer it fills: one that draws (drawRect:) or updates its layer itself (wantsUpdateLayer; Qt 6
+   paints only from updateLayer). */
+- (BOOL)hk_fillsLayer {
+    static IMP base;
+    if (!base) base = class_getMethodImplementation([NSView class], @selector(displayLayer:));
+    return [self hk_draws] || [self wantsUpdateLayer] ||
+           class_getMethodImplementation([self class], @selector(displayLayer:)) != base; /* Qt 6's QNSView */
+}
 - (void)setNeedsDisplay:(BOOL)flag {
     _needsDisplay = flag;
-    if (flag && [self hk_draws]) [self.layer setNeedsDisplay];
+    if (flag && [self hk_fillsLayer]) [self.layer setNeedsDisplay];
 }
 - (void)setNeedsDisplayInRect:(NSRect)rect { [self setNeedsDisplay:YES]; }
-- (void)display { if ([self hk_draws]) [self.layer displayIfNeeded]; }
+- (void)display { if ([self hk_fillsLayer]) [self.layer displayIfNeeded]; }
 - (void)displayIfNeeded { [self display]; }
 - (void)displayRect:(NSRect)rect { [self display]; }
 - (void)layout {}
@@ -1291,7 +1299,9 @@ static NSArray<NSString *> *app_notifications(void) {
     pthread_mutex_t _qlock;
     CFRunLoopSourceRef _wake;
     CFRunLoopRef _loop;
-    BOOL _running, _active, _launched, _stopRequested, _terminating;
+    BOOL _running, _active, _launched, _stopRequested, _terminating, _modalStopped;
+    NSModalResponse _modalCode;
+    NSMutableArray<NSWindow *> *_modal; /* windows of the modal sessions, innermost last */
     NSEvent *_current;
     NSApplicationActivationPolicy _policy;
 }
@@ -1356,7 +1366,7 @@ static void wake_perform(void *info) {}
 - (NSArray<NSWindow *> *)orderedWindows { return [[g_windows reverseObjectEnumerator] allObjects]; }
 - (NSWindow *)keyWindow { return g_key; }
 - (NSWindow *)mainWindow { return g_main; }
-- (NSWindow *)modalWindow { return nil; }
+- (NSWindow *)modalWindow { return _modal.lastObject; }
 - (NSEvent *)currentEvent { return _current; }
 - (BOOL)isActive { return _active; }
 - (BOOL)isRunning { return _running; }
@@ -1567,10 +1577,55 @@ static void wake_perform(void *info) {}
     return nil;
 }
 
-- (NSModalResponse)runModalForWindow:(NSWindow *)window { return 0; }
-- (void)stopModal {}
-- (void)stopModalWithCode:(NSModalResponse)code {}
-- (void)abortModal {}
+/* Modal windows, as AppKit runs them: a session shows the window as key; runModalSession: handles what events are
+   waiting (in the modal run-loop mode) and answers NSModalResponseContinue (-1002) until stopModal (-1000),
+   stopModalWithCode: or abortModal (-1001) ends it; runModalForWindow: is a session run until then. Qt's dialogs
+   (and NSAlert) run this way. */
+- (void *)beginModalSessionForWindow:(NSWindow *)window {
+    if (!window) return NULL;
+    if (!_modal) _modal = [NSMutableArray array];
+    [_modal addObject:window];
+    _modalStopped = NO;
+    [window makeKeyAndOrderFront:nil];
+    return (__bridge void *)window;
+}
+- (NSModalResponse)runModalSession:(void *)session {
+    for (int i = 0; i < 64 && !_modalStopped; i++) {
+        @autoreleasepool {
+            NSEvent *e = [self nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:@"NSModalPanelRunLoopMode" dequeue:YES];
+            if (!e) break;
+            [self sendEvent:e];
+        }
+    }
+    if (!_modalStopped) return -1002; /* NSModalResponseContinue */
+    _modalStopped = NO;
+    return _modalCode;
+}
+- (void)endModalSession:(void *)session {
+    NSWindow *w = (__bridge NSWindow *)session;
+    if (w) [_modal removeObjectIdenticalTo:w];
+}
+- (NSModalResponse)runModalForWindow:(NSWindow *)window {
+    void *session = [self beginModalSessionForWindow:window];
+    if (!session) return -1001;
+    NSModalResponse r;
+    while ((r = [self runModalSession:session]) == -1002) {
+        @autoreleasepool { /* wait for the next event (or a stop) without taking it */
+            [self nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]
+                                 inMode:@"NSModalPanelRunLoopMode" dequeue:NO];
+        }
+    }
+    [self endModalSession:session];
+    return r;
+}
+- (void)stopModal { [self stopModalWithCode:-1000]; }
+- (void)stopModalWithCode:(NSModalResponse)code {
+    _modalStopped = YES;
+    _modalCode = code;
+    CFRunLoopSourceSignal(_wake);
+    CFRunLoopWakeUp(_loop);
+}
+- (void)abortModal { [self stopModalWithCode:-1001]; }
 @end
 
 /* The app's bundle (adopted by the loader), not the host's: what Henge's AppKit reads for the app. */

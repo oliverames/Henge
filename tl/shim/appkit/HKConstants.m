@@ -241,6 +241,15 @@ NSString *const NSPasteboardTypeRTF = @"public.rtf";
 NSString *const NSPasteboardTypeString = @"public.utf8-plain-text";
 NSString *const NSPasteboardTypeTIFF = @"public.tiff";
 NSString *const NSPasteboardTypeURL = @"public.url";
+NSString *const NSPasteboardTypePDF = @"com.adobe.pdf";
+NSString *const NSPasteboardTypeRTFD = @"com.apple.flat-rtfd";
+NSString *const NSPasteboardTypeFont = @"com.apple.cocoa.pasteboard.character-formatting";
+NSString *const NSPasteboardTypeRuler = @"com.apple.cocoa.pasteboard.paragraph-formatting";
+NSString *const NSPasteboardTypeTabularText = @"public.utf8-tab-separated-values-text";
+NSString *const NSPasteboardTypeMultipleTextSelection = @"com.apple.cocoa.pasteboard.multiple-text-selection";
+NSString *const NSPasteboardTypeSound = @"com.apple.cocoa.pasteboard.sound";
+NSString *const NSPasteboardTypeTextFinderOptions = @"com.apple.cocoa.pasteboard.find-panel-search-options";
+NSString *const NSFileContentsPboardType = @"NSFileContentsPboardType";
 
 /* ---- The rest ---- */
 NSString *const NSAppearanceNameAccessibilityHighContrastAqua = @"NSAppearanceNameAccessibilityAqua";

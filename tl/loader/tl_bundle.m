@@ -36,6 +36,21 @@ void tl_adopt_ns_bundle(int ns, const char *app_path) {
 
 void *tl_main_bundle(void) { return (__bridge void *)g_bundle; }
 
+/* CFBundleGetMainBundle() for the app's code (tl_loader.c answers its imports of it here): the app's bundle as a
+   CFBundle, or a started process's own; NULL before one is adopted. Qt finds its plugins (Contents/PlugIns) and
+   qt.conf this way. */
+static CFBundleRef g_cf_main, g_cf_ns[64];
+void *tl_cf_main_bundle(int ns) {
+    @autoreleasepool {
+        int own = ns > 0 && ns < 64 && g_ns_bundles[ns];
+        NSBundle *b = own ? g_ns_bundles[ns] : g_bundle;
+        if (!b) return NULL;
+        CFBundleRef *slot = own ? &g_cf_ns[ns] : &g_cf_main;
+        if (!*slot) *slot = CFBundleCreate(NULL, (__bridge CFURLRef)b.bundleURL);
+        return *slot;
+    }
+}
+
 int tl_adopt_main_bundle(const char *app_path) {
     @autoreleasepool {
         NSBundle *b = [NSBundle bundleWithPath:@(app_path)];

@@ -78,6 +78,7 @@ static int looks_like_string_constant(const char *name) {
         return 0;
     for (size_t i = 0; i < sizeof tails / sizeof *tails; i++)
         if (ends_with(name, tails[i])) return 1;
+    if (!strncmp(name, "NSPasteboardType", 16) || strstr(name, "PboardType")) return 1; /* NSPasteboardTypePDF, ... */
     return 0;
 }
 
