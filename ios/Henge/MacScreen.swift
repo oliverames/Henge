@@ -27,6 +27,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = UIColor(white: 0.08, alpha: 1)
+        isMultipleTouchEnabled = true // two-finger taps and slides (a view gets one touch otherwise)
         stage.anchorPoint = .zero
         stage.isGeometryFlipped = true // the Mac's way up: origin at the bottom left
         stage.masksToBounds = true
@@ -75,8 +76,11 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         drag.maximumNumberOfTouches = 1
         let click = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
         click.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        // Only a mouse's or trackpad's: a finger's tap has no buttons, and this took it as a right click where the
+        // finger was (the pointer jumped there and nothing was clicked).
         let rightClick = UITapGestureRecognizer(target: self, action: #selector(rightClicked(_:)))
         rightClick.buttonMaskRequired = .secondary
+        rightClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         for g in [wheel, hover, drag, click, rightClick] as [UIGestureRecognizer] { addGestureRecognizer(g) }
         // The pointer: the Mac's arrow, white with a dark edge, its tip at the point.
         let path = UIBezierPath()

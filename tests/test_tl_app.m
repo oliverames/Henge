@@ -11,6 +11,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <stdatomic.h>
+#include <pthread.h>
 
 #include "henge-ios-jit.h"
 #include "henge-tl.h"
@@ -38,6 +39,78 @@ int henge_ios_take_high_room(void **base, size_t *bytes) {
 
 static NSString *g_dir;
 static int g_n;
+
+/* TEST_TL_IN=FIFO: input as the phone's screen sends it, in the Mac's screen points with the origin at the top left
+   (as one reads a snapshot): "tap X Y" (press and release at once, as a trackpad tap), "click X Y" (moved there
+   first, as a touch-mode tap), "right X Y", "move X Y", "down X Y", "drag X Y", "up X Y", "scroll DX DY X Y",
+   "key CODE [CHARS|RET]", "type TEXT", "snap". */
+static void snap(CFRunLoopTimerRef t, void *info);
+static double screen_h = 680;
+
+static void input_line(NSString *line) {
+    NSArray<NSString *> *f = [line componentsSeparatedByString:@" "];
+    NSString *cmd = f.firstObject;
+    double a = f.count > 1 ? f[1].doubleValue : 0, b = f.count > 2 ? f[2].doubleValue : 0;
+    double y = screen_h - b;
+    if ([cmd isEqualToString:@"snap"]) {
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{ snap(NULL, NULL); });
+        CFRunLoopWakeUp(CFRunLoopGetMain());
+    } else if ([cmd isEqualToString:@"tap"]) {
+        henge_tl_app_mouse(1, a, y, 1, 0);
+        henge_tl_app_mouse(2, a, y, 1, 0);
+    } else if ([cmd isEqualToString:@"click"]) {
+        henge_tl_app_mouse(5, a, y, 0, 0);
+        henge_tl_app_mouse(1, a, y, 1, 0);
+        henge_tl_app_mouse(2, a, y, 1, 0);
+    } else if ([cmd isEqualToString:@"right"]) {
+        henge_tl_app_mouse(3, a, y, 1, 0);
+        henge_tl_app_mouse(4, a, y, 1, 0);
+    } else if ([cmd isEqualToString:@"move"]) henge_tl_app_mouse(5, a, y, 0, 0);
+    else if ([cmd isEqualToString:@"down"]) henge_tl_app_mouse(1, a, y, 1, 0);
+    else if ([cmd isEqualToString:@"drag"]) henge_tl_app_mouse(6, a, y, 1, 0);
+    else if ([cmd isEqualToString:@"up"]) henge_tl_app_mouse(2, a, y, 1, 0);
+    else if ([cmd isEqualToString:@"scroll"] && f.count > 4) {
+        double sx = f[3].doubleValue, sy = screen_h - f[4].doubleValue;
+        henge_tl_app_scroll(sx, sy, 0, 0, 1);
+        for (int i = 0; i < 5; i++) { henge_tl_app_scroll(sx, sy, a / 5, b / 5, 4); usleep(16000); }
+        henge_tl_app_scroll(sx, sy, 0, 0, 8);
+    } else if ([cmd isEqualToString:@"key"]) {
+        NSString *c = f.count > 2 ? f[2] : @"";
+        if ([c isEqualToString:@"RET"]) c = @"\r";
+        henge_tl_app_key(1, (unsigned short)a, c.UTF8String, 0);
+        henge_tl_app_key(0, (unsigned short)a, c.UTF8String, 0);
+    } else if ([cmd isEqualToString:@"type"] && line.length > 5) {
+        NSString *text = [line substringFromIndex:5];
+        for (NSUInteger i = 0; i < text.length; i++) {
+            const char *c = [text substringWithRange:NSMakeRange(i, 1)].UTF8String;
+            henge_tl_app_key(1, 0, c, 0);
+            henge_tl_app_key(0, 0, c, 0);
+        }
+    } else fprintf(stderr, "test_tl_app: unknown input '%s'\n", line.UTF8String);
+}
+
+/* The screen's input arrives on the main thread (UIKit's gesture callbacks): so here. */
+static void *input_thread(void *arg) {
+    const char *path = arg;
+    for (;;) {
+        FILE *f = fopen(path, "r");
+        if (!f) { sleep(1); continue; }
+        char buf[4096];
+        while (fgets(buf, sizeof buf, f)) {
+            buf[strcspn(buf, "\n")] = 0;
+            NSString *line = @(buf);
+            dispatch_semaphore_t done = dispatch_semaphore_create(0);
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+                @autoreleasepool { input_line(line); }
+                dispatch_semaphore_signal(done);
+            });
+            CFRunLoopWakeUp(CFRunLoopGetMain());
+            dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+        }
+        fclose(f);
+    }
+    return NULL;
+}
 
 static void changed(void) { fprintf(stderr, "test_tl_app: %d windows\n", henge_tl_app_window_count()); }
 
@@ -118,7 +191,9 @@ int main(int argc, char **argv) {
         double every = argc > 3 ? atof(argv[3]) : 5;
         /* NSParagraphStyle, string drawing: UIKit always has UIFoundation loaded on iOS. */
         dlopen("/System/Library/PrivateFrameworks/UIFoundation.framework/UIFoundation", RTLD_LAZY);
-        henge_tl_app_set_screen(1180, 680, 2);
+        double screen_w = 1180; /* TEST_TL_SCREEN=WxH: another screen (an iPhone 17 Pro's is 1180x543) */
+        if (getenv("TEST_TL_SCREEN")) sscanf(getenv("TEST_TL_SCREEN"), "%lfx%lf", &screen_w, &screen_h);
+        henge_tl_app_set_screen(screen_w, screen_h, 2);
         henge_tl_app_on_change(changed);
         /* Loaded on another thread, as the app does (MacAppScreen loads off the main thread). */
         static char err[512] = "";
@@ -133,6 +208,10 @@ int main(int argc, char **argv) {
         if (rc) {
             fprintf(stderr, "test_tl_app: %s\n", err);
             return 1;
+        }
+        if (getenv("TEST_TL_IN")) {
+            pthread_t th;
+            pthread_create(&th, NULL, input_thread, strdup(getenv("TEST_TL_IN")));
         }
         CFRunLoopTimerRef t = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + every, every, 0, 0, snap, NULL);
         CFRunLoopAddTimer(CFRunLoopGetMain(), t, kCFRunLoopCommonModes);
