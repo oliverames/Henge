@@ -77,6 +77,7 @@ enum Device {
 enum HardwareKeys {
     private static var held: Set<UInt8> = []
     private static var lastKey: CFTimeInterval = 0
+    private static var chordsLogged = 0
 
     /// With the on-screen keyboard's view holding the keyboard, iOS may also offer a hardware key as
     /// text, and again as it repeats. The Mac has the key already, and repeats it itself.
@@ -103,6 +104,10 @@ enum HardwareKeys {
                 continue
             }
             let usage = UInt8(raw)
+            if down, usage < 0xe0, held.contains(0xe3) || held.contains(0xe7), chordsLogged < 40 {
+                chordsLogged += 1 // which ⌘ shortcuts reach the Mac; one iOS keeps never shows here
+                HengeLog.log("input", "⌘ shortcut to the Mac: key 0x\(String(usage, radix: 16))")
+            }
             henge_vm_key_hid(usage, down ? 1 : 0)
             if usage < 0xe0 { lastKey = CACurrentMediaTime() }
             if down {

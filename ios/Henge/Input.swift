@@ -1,4 +1,5 @@
 import SwiftUI
+import GameController
 import UIKit
 
 /// Types into the Mac. Two invisible views take turns holding the keyboard: one that asks for the
@@ -63,6 +64,12 @@ struct KeyboardCatcher: UIViewRepresentable {
         override var canBecomeFirstResponder: Bool { true }
         /// Fingers belong to the session (they drive the Mac's trackpad), not to iPadOS's undo/copy/paste bar.
         override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
+        /// With a keyboard attached, ⌘C, ⌘V, ⌘X, ⌘A and ⌘Z are the Mac's: iOS would otherwise offer them to this
+        /// responder as its own copy, paste and undo actions and keep the keys from it (#122).
+        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            GCKeyboard.coalesced == nil && super.canPerformAction(action, withSender: sender)
+        }
+        override var undoManager: UndoManager? { GCKeyboard.coalesced == nil ? super.undoManager : nil }
 
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
             let rest = HardwareKeys.send(presses, down: true)
