@@ -209,10 +209,14 @@ int main(void) {
     {
         static const struct { uint32_t scale, num, pages; } ranges[2] = {{1, 7, 512}, {2, 2, 6144}};
         const uint64_t base = 0xfffffe0040000000ull;
-        for (int r = 0; r < 2; r++) {
+        /* Pages inside the range and pages past it go in separate passes: with a smaller TLB (HV_TLB_BITS) some of them
+           share a slot, and a page past the range written last would stand in for a dropped one. */
+        for (int rp = 0; rp < 4; rp++) {
+            const int r = rp / 2, inside = !(rp & 1);
             hv_tlb_flush(&cpu);
             const int32_t ks[6] = {0, 1, (int32_t)ranges[r].pages / 2, (int32_t)ranges[r].pages - 1, (int32_t)ranges[r].pages, (int32_t)ranges[r].pages + 300};
             for (int k = 0; k < 6; k++) {
+                if ((ks[k] < (int32_t)ranges[r].pages) != inside) continue;
                 uint64_t va = base + ((uint64_t)ks[k] << 14);
                 HvTlbEntry *t = hv_tlb_ent(&cpu, (va >> 14) & (HV_TLB_SIZE - 1), 1);
                 t->read_tag = va - HV_TLB_ADJ;
@@ -226,10 +230,11 @@ int main(void) {
             cpu.x[1] = 0ull << 48 | 2ull << 46 | (uint64_t)ranges[r].scale << 44 | (uint64_t)ranges[r].num << 39 | ((base >> 14) & 0x1fffffffffull);
             hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
             for (int k = 0; k < 6; k++) {
+                if ((ks[k] < (int32_t)ranges[r].pages) != inside) continue;
                 uint64_t va = base + ((uint64_t)ks[k] << 14);
                 int dropped = hv_tlb_ent(&cpu, (va >> 14) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID;
                 checks++;
-                if (dropped != (ks[k] < (int32_t)ranges[r].pages)) {
+                if (dropped != inside) {
                     printf("  FAIL big kernel range %u pages, page %d: %s\n", ranges[r].pages, ks[k], dropped ? "dropped" : "kept");
                     failures++;
                 }
