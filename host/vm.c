@@ -180,10 +180,6 @@ static uint8_t *adt_find(uint8_t *dt, uint64_t len, const char *node, const char
     return NULL;
 }
 
-static uint8_t *adt_prop(uint8_t *dt, uint64_t len, const char *node, const char *prop, uint32_t *plen) {
-    return adt_find(dt, len, node, prop, plen, NULL);
-}
-
 /* A u32 property added to a node, as its first: the rest of the tree moves up 40 bytes. Only into slack: the zeros
    between the last node's end and the length boot_args gives (iBoot rounds it up), or failing that between the length
    and its 16 KB page's end, when boot_args gets the new length. */
