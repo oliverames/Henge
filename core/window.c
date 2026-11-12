@@ -24,6 +24,9 @@
 #include "machine.h"
 
 #define WPAGE (1ull << HV_TLB_PAGE_BITS)
+/* One never-mapped page past the window: an access that starts in its last page and runs past the end faults
+   there and takes the TLB path, instead of reaching whatever the host has mapped next. */
+#define WGUARD WPAGE
 #define SLOTS 8192u /* hash slots: twice the pages it holds before starting over */
 #define MAXPAGES (SLOTS / 2)
 
@@ -99,7 +102,7 @@ int hv_window_attach(HvCpu *cpu) {
     HvWindow *w = calloc(1, sizeof *w);
     if (!w) return -1;
     w->size = 1ull << bits;
-    void *p = mmap(NULL, w->size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+    void *p = mmap(NULL, w->size + WGUARD, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED) {
         free(w);
         return -1;
@@ -136,7 +139,7 @@ void hv_window_detach(HvCpu *cpu) {
     if (!w) return;
     cpu->pc_state->win = NULL;
     cpu->win_base = 0;
-    munmap(w->base, w->size);
+    munmap(w->base, w->size + WGUARD);
     free(w);
 }
 
@@ -166,11 +169,15 @@ void hv_window_drop_except(HvCpu *cpu, uint64_t lo, const uint64_t *keep, uint32
 
 void hv_window_drop_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     HvWindow *w = cpu->pc_state ? cpu->pc_state->win : NULL;
-    if (!w || !w->n) return;
+    if (!w) return;
     va &= 0x00ffffffffffffffull; /* tagged: by the low 56 bits, as the TLB */
     if (va >= w->size) return;
     uint64_t first = va & ~(WPAGE - 1), end = va + len < w->size ? va + len : w->size;
-    lock(w);
+    lock(w); /* before looking at n: the fault handler maps a page and counts it under the lock */
+    if (!w->n) {
+        unlock(w);
+        return;
+    }
     if ((end - first) >> HV_TLB_PAGE_BITS > SLOTS) { /* a big range: through the hash instead */
         for (uint32_t i = 0; i < SLOTS;) {
             uint64_t p = w->slot[i].va;
@@ -248,7 +255,7 @@ int hv_window_signal(HvMachine *m, siginfo_t *info, void *ctx) {
     HvWindow *w = cpu && cpu->pc_state ? cpu->pc_state->win : NULL;
     if (!w) return 0;
     uint64_t addr = (uint64_t)(uintptr_t)info->si_addr;
-    if (addr - (uint64_t)(uintptr_t)w->base >= w->size) return 0;
+    if (addr - (uint64_t)(uintptr_t)w->base >= w->size + WGUARD) return 0;
     uint64_t rx = (uint64_t)(uintptr_t)m->jit.base;
     if (pc - rx >= (uint64_t)m->jit.capacity * 4 || pc + 4 - rx >= (uint64_t)m->jit.capacity * 4) return 0;
     uint32_t marker = *(const uint32_t *)(uintptr_t)(pc + 4);
@@ -262,7 +269,7 @@ int hv_window_signal(HvMachine *m, siginfo_t *info, void *ctx) {
     lock(w);
     HvTlbEntry *e = hv_tlb_ent(cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 0);
     int r_ok = e->read_tag + HV_TLB_ADJ == va, w_ok = e->write_tag + HV_TLB_ADJ == va;
-    if (va && !m->watch_va && !m->watch_pa && (write ? w_ok : r_ok)) {
+    if (va && va < w->size && !m->watch_va && !m->watch_pa && (write ? w_ok : r_ok)) {
         const uint8_t *host = (const uint8_t *)(uintptr_t)(va + (uint64_t)e->addend);
         HvRam *ram = ram_with(m, host);
         /* writable only where the TLB says so and the page holds no translated code (as tlb_fill's write_guard) */

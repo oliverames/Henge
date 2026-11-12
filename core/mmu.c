@@ -741,7 +741,7 @@ int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid) {
     if ((s1 & 1) && !walks_elsewhere(target, s1, s1, va, 1)) { if (target->m->stats_interval) target->m->stats.race_kind[0]++; return 0; }
     uint32_t c1 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
     if (c1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; } /* caching a block it may have looked up through the old mapping */
-    if (!((va >> 55) & 1)) stash_drop_va(p, va, asid), hv_window_drop_range(target, va, 1);
+    if (!((va >> 55) & 1)) stash_drop_va(p, va, asid);
     uint32_t idx = (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
     int fetched = 0; /* the target may be running code from the page: it must leave and look again */
     for (int t = 0; t < 3; t++) { /* the slot whatever its tag byte, as hv_tlb_flush_va_asid does */
@@ -753,6 +753,10 @@ int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid) {
         __atomic_store_n(&e->exec_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
     }
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    /* The window's mapping of the page goes after the TLB slots: its fault handler maps a page only while the slot
+       is valid, under the window lock, so a map that read the slot before this is undone here, and one after sees
+       it gone. */
+    if (!((va >> 55) & 1)) hv_window_drop_range(target, va, 1);
     /* Its cached branch targets in the page too: a cache fill checks the TLB
        entry first (hv_ijc_fill_checked), so one after this sees it gone, and one
        during it changed ijc_seq. */
@@ -779,7 +783,7 @@ int hv_tlbi_drop_remote_range(HvCpu *target, uint64_t va, uint64_t npages, int a
     if ((s1 & 1) && !walks_elsewhere(target, s1, s1, va, npages)) { if (target->m->stats_interval) target->m->stats.race_kind[0]++; return 0; }
     uint32_t c1 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
     if (c1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; }
-    if (!((va >> 55) & 1)) stash_drop_range(p, va, npages, asid), hv_window_drop_range(target, va, npages << HV_TLB_PAGE_BITS);
+    if (!((va >> 55) & 1)) stash_drop_range(p, va, npages, asid);
     int fetched = 0;
     for (uint64_t i = 0; i < npages && i < HV_TLB_SIZE; i++) { /* past HV_TLB_SIZE pages the slots come round again */
         uint32_t idx = (uint32_t)((va >> HV_TLB_PAGE_BITS) + i) & (HV_TLB_SIZE - 1);
@@ -797,6 +801,7 @@ int hv_tlbi_drop_remote_range(HvCpu *target, uint64_t va, uint64_t npages, int a
         }
     }
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (!((va >> 55) & 1)) hv_window_drop_range(target, va, npages << HV_TLB_PAGE_BITS); /* after the slots, as for one page */
     for (uint64_t i = 0; i < npages; i++)
         if (!ijc_drop_va(target, va + (i << HV_TLB_PAGE_BITS), asid, 1)) return -1;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
