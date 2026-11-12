@@ -6,6 +6,7 @@
 #include "classify.h"
 #include "memop.h"
 #include "mmu.h"
+#include "window.h"
 #include "operands.h"
 
 /* A block has two parts. The hot part is the code that runs every time: the translated
@@ -1076,6 +1077,27 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
        makes an access that runs into the next page miss. Uses no flags. */
     int el_idx = g_el;
     uint32_t slow = ~0u;
+    /* HV_EL0_WINDOW (window.c): user memory is mapped at win_base + VA, so the access runs on that address
+       when the VA is below 2^bits. A page not mapped there faults; the handler maps it if the TLB entry
+       allows the access, or else sends the context to Lfull, the usual TLB path, through the ADR XZR
+       marker that follows the access (it reads the marker's target). */
+    int win_bits = hv_window_enabled();
+    int win = win_bits && !role && g_el == 0 && (op.kind == HV_MEM_SINGLE || op.kind == HV_MEM_PAIR) && !vec_kind && !rmw &&
+              !op.align && !e->slow_mem;
+    /* A pair's host address goes in its own register: Lfull needs the guest one again. When that is A, T
+       (free after the addend) holds it instead, unless T stands in for Rt. */
+    int host = A;
+    if (win && op.kind == HV_MEM_PAIR && addr == A) {
+        if (!op.vec && is_stolen(op.rt)) win = 0;
+        else host = T;
+    }
+    uint32_t win_full = 0, win_skip = 0;
+    if (win) {
+        put(e, UBFM_X(U, addr, (uint32_t)win_bits, 63)); /* lsr U, addr, #bits */
+        win_skip = e->n;
+        put(e, CBZ_X(U)); /* to the window access, over Lfull */
+        win_full = e->n;
+    }
     if (!role) {
     uint32_t tlb = put_tlb_slot(e, T, addr, el_idx);
     put(e, LDR_X(U, T, tlb + (op.store ? 8 : 0)));
@@ -1105,9 +1127,17 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
     slow = e->nool - 1;
     put(e, LDR_X(U, T, tlb + 24));
     }
+    uint32_t win_join = 0;
+    if (win) {
+        win_join = e->n;
+        put(e, B_OP); /* Lfull's way to the access */
+        link_here(e, win_skip, e->in_cold);
+        put(e, LDR_X(U, 28, HV_CPU_WIN_BASE));
+        plink(e, win_join, e->in_cold, e->n, e->in_cold);
+    }
     /* Single loads and stores take [addr, addend] directly; the rest want the host address in A. */
     int reg_offset = op.kind == HV_MEM_SINGLE || op.kind == HV_MEM_LITERAL || op.kind == HV_MEM_LDRA;
-    if (!reg_offset && !role) put(e, ADD_LSL(A, addr, U, 0));
+    if (!reg_offset && !role) put(e, ADD_LSL(host, addr, U, 0));
     if (role) {
         int64_t scale = 1ll << op.size;
         int fits = pair ? gimm % scale == 0 && gimm / scale >= -64 && gimm / scale < 64
@@ -1140,7 +1170,7 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
     switch (op.kind) {
     case HV_MEM_PAIR: {
         uint32_t opc = op.vec ? op.size - 2u : (op.sign ? 1u : op.size == 3 ? 2u : 0u);
-        out = opc << 30 | 0x29000000u | (uint32_t)op.vec << 26 | (uint32_t)op.load << 22 | rt2 << 10 | A << 5 | rt;
+        out = opc << 30 | 0x29000000u | (uint32_t)op.vec << 26 | (uint32_t)op.load << 22 | rt2 << 10 | (uint32_t)host << 5 | rt;
         if (role) out |= ((uint32_t)(gimm >> op.size) & 0x7f) << 15;
         break;
     }
@@ -1174,6 +1204,10 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
         break;
     }
     put(e, out);
+    if (win) { /* adr xzr, Lfull: executes as nothing; the fault handler reads where it points */
+        int64_t off = ((int64_t)win_full - (int64_t)e->n) * 4;
+        put(e, 0x10000000u | ((uint32_t)off & 3) << 29 | ((uint32_t)(off >> 2) & 0x7ffff) << 5 | 31u);
+    }
 
     if (rmw) {
         if (rs_stolen && op.kind == HV_MEM_CAS) put(e, STR_X(rs, 28, slot_of(op.rs)));
@@ -1841,6 +1875,10 @@ static void plan_groups(Emit *e, const uint32_t *code, uint32_t max, uint64_t va
     e->ngrp = 0;
     memset(e->gid, -1, sizeof e->gid);
     if (e->nogroup || e->slow_mem) return;
+    /* HV_WINDOW_NOGROUP: user blocks leave every access to the window (an A/B against grouping's one TLB check). */
+    static int win_nogroup = -1;
+    if (win_nogroup < 0) win_nogroup = getenv("HV_WINDOW_NOGROUP") != NULL;
+    if (win_nogroup && hv_window_enabled() && !(e->flags & HV_BLOCK_EL1)) return;
     int cur[32];
     int64_t delta[32];
     for (int r = 0; r < 32; r++) cur[r] = -1, delta[r] = 0;

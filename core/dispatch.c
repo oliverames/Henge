@@ -841,8 +841,14 @@ static void print_stats(HvCpu *cpu, int force) {
         fprintf(stderr, "  light refills K/s by mapping: el0 page %.0f block %.0f big block %.0f, el1 page %.0f block %.0f big block %.0f\n",
                 RATE(refill_map[0][0]) / 1e3, RATE(refill_map[0][1]) / 1e3, RATE(refill_map[0][2]) / 1e3,
                 RATE(refill_map[1][0]) / 1e3, RATE(refill_map[1][1]) / 1e3, RATE(refill_map[1][2]) / 1e3);
+        fprintf(stderr, "  el0 light refills K/s by VA: shared region (6-14 GB) %.0f, other below 64 GB %.0f, 64-512 GB %.0f, above %.0f\n",
+                RATE(refill_el0_va[0]) / 1e3, RATE(refill_el0_va[1]) / 1e3, RATE(refill_el0_va[2]) / 1e3, RATE(refill_el0_va[3]) / 1e3);
         fprintf(stderr, "  process switches: %.0f/s saved, %.0f/s restored, %.0f/s dropped by a TLBI (%.0f entries each)\n", RATE(stash_saves), RATE(stash_hits), RATE(stash_stale),
                 s->stash_hits - last.stash_hits ? (double)(s->stash_entries - last.stash_entries) / (s->stash_hits - last.stash_hits) : 0.0);
+        if (s->shared_keeps != last.shared_keeps || s->shared_bad != last.shared_bad)
+            fprintf(stderr, "  shared tables kept live: %.0f switches/s (%.0f entries each), %.0f checks found one stale\n", RATE(shared_keeps),
+                    s->shared_keeps - last.shared_keeps ? (double)(s->shared_kept - last.shared_kept) / (s->shared_keeps - last.shared_keeps) : 0.0,
+                    (double)(s->shared_bad - last.shared_bad));
         fprintf(stderr, "  tlb misses K/s: el0 empty %.0f el0 conflict %.0f el1 empty %.0f el1 conflict %.0f\n",
                 RATE(tlb_miss_kind[0]) / 1e3, RATE(tlb_miss_kind[1]) / 1e3, RATE(tlb_miss_kind[2]) / 1e3, RATE(tlb_miss_kind[3]) / 1e3);
         fprintf(stderr, "  slow mem causes K/s: mmio %.0f code-page write %.0f page end %.0f tlb miss %.0f other %.0f entry-but-tag %.0f\n",

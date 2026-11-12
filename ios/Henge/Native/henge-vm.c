@@ -179,7 +179,7 @@ int henge_vm_continue(void) {
 
 static int boot_or_resume(const char *rom, const char *disk, const char *aux, uint64_t ecid, uint64_t seed, uint64_t ram_mb,
                           int cpus, const char *resume, const char *ident, char *err, size_t errlen) {
-    { extern void hv_prof_ios_start(void); hv_prof_ios_start(); }
+    { extern void hv_prof_ios_start(void), hv_fault_bench(void), hv_log_va_range(void); hv_log_va_range(); hv_fault_bench(); hv_prof_ios_start(); }
     if (begin_start(err, errlen)) return -1;
     HengeDualMapping *jit = henge_ios_jit_get_mapping();
     if (!jit || !jit->rw_addr) {

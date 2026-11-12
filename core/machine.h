@@ -85,11 +85,14 @@ typedef struct HvStats {
     uint64_t tr_waits, tr_wait_ticks;   /* translation lock likewise */
     uint64_t words_inline, words_ool, words_pool; /* translated code size by part */
     uint64_t refills;
+    uint64_t refill_el0_va[4]; /* EL0 light refills by guest VA: the shared region (6-14 GB), elsewhere below 64 GB, below 512 GB, above (how much a direct-mapped window could cover) */
     uint64_t refill_map[2][3]; /* light refills by EL (0, 1) and the guest mapping they found: a 16 KB page, a block up to 32 MB, a bigger block */
     uint64_t ijc_light;       /* branch-cache misses resolved without the dispatcher (hv_ijc_resolve) */         /* TLB misses filled by the light path (hv_tlb_refill) */
     uint64_t stash_saves, stash_hits, stash_entries; /* user TLB entries kept across process switches */
     uint64_t code_protects;   /* pages that became code (every CPU's TLB scanned for writable entries) */
     uint64_t tlb_miss_kind[4]; /* TLB misses: EL0 empty, EL0 other page there, EL1 empty, EL1 other page there */
+    uint64_t win_maps, win_misses; /* HV_EL0_WINDOW faults: pages mapped, accesses sent to their TLB path */
+    uint64_t shared_keeps, shared_kept, shared_bad; /* HV_SHARED_KEEP: switches that kept shared-table entries live, entries kept, checks that found one stale */
     uint64_t stash_stale;     /* process switches that found the stash dropped by a TLBI meanwhile */
     uint64_t slow_why[6];
     uint64_t small_pages;     /* of the TLB misses above: the guest maps the page with a granule under 16 KB (4 KB), which the TLB cannot hold */
@@ -212,6 +215,7 @@ typedef struct HvPerCpu {
     uint32_t thread;             /* its host thread (mach_port_t), for --stats: is a CPU waited for running at all */
     uint8_t phase;               /* for --stats, what a CPU others wait on is doing: HV_PHASE_* */
     HvTlbStash stash[HV_STASHES];
+    struct HvWindow *win;    /* HV_EL0_WINDOW (window.c): kept when the CPU is reset */
     uint64_t stash_clock;
 } HvPerCpu;
 
@@ -335,7 +339,7 @@ int hv_ic_ivau_drops(void);
 /* Settings that say how to translate or wait, to compare ways of doing it in one running guest
    ("knob NAME VALUE" in HV_INPUT_FILE; a new way starts from an empty code cache). Each starts
    from the environment variable named in hv_knob_names. */
-enum { HV_K_NO_RAS, HV_K_SUPERBLOCKS, HV_K_GROUPS, HV_K_WFI_SPIN, HV_K_FLUSH, HV_K_TEST1, HV_K_TEST2, HV_K_TEST3, HV_K_TLBT, HV_K_JITCAP, HV_K_RECHECK, HV_K_SYNCWAIT, HV_K_SWITCHFLUSH, HV_K_RANGEDROP, HV_K_MOVIMM, HV_K_PREDSTAT, HV_K_WALKLOG, HV_K_HOIST, HV_K_IJCPAGES, HV_K_DNSPROXY, HV_K_JITSEGS, HV_K_COUNT };
+enum { HV_K_NO_RAS, HV_K_SUPERBLOCKS, HV_K_GROUPS, HV_K_WFI_SPIN, HV_K_FLUSH, HV_K_TEST1, HV_K_TEST2, HV_K_TEST3, HV_K_TLBT, HV_K_JITCAP, HV_K_RECHECK, HV_K_SYNCWAIT, HV_K_SWITCHFLUSH, HV_K_RANGEDROP, HV_K_MOVIMM, HV_K_PREDSTAT, HV_K_WALKLOG, HV_K_HOIST, HV_K_IJCPAGES, HV_K_DNSPROXY, HV_K_JITSEGS, HV_K_SHAREDKEEP, HV_K_EL0WINDOW, HV_K_COUNT };
 extern int hv_knob[HV_K_COUNT];
 int hv_knob_set(HvMachine *m, const char *name, int value);
 /* Debugging (HV_WATCH): which pages keep losing their translations. */
