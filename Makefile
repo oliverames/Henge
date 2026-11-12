@@ -1,6 +1,8 @@
 # Light build: one clang call per file, no parallel jobs needed.
 CC = clang
-CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices
+# ENGINE_DEFS: build-time engine settings for experiments, such as ENGINE_DEFS=-DHV_TLB_BITS=12 (core/cpu.h).
+ENGINE_DEFS ?=
+CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices $(ENGINE_DEFS)
 B = build
 
 CORE = $(B)/classify.o $(B)/operands.o $(B)/translate.o $(B)/dispatch.o $(B)/mmu.o $(B)/memop.o \
@@ -130,7 +132,7 @@ IOS_SDK = $(shell xcrun --sdk iphoneos --show-sdk-path)
 IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot $(IOS_SDK)
 # ios/deps/include/slirp first when it holds libslirp's headers (they are all the engine takes from there).
 IOS_DEPS ?= $(if $(wildcard ios/deps/include/slirp/libslirp.h),$(CURDIR)/ios/deps,$(HOME)/Documents/Coding/Husk/build/ios-arm64/sysroot)
-IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp
+IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp $(ENGINE_DEFS)
 IB = build/ios
 IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/vm.c host/snapshot.c host/net_slirp.c host/dns_proxy.c host/share.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
           $(filter-out devices/pvg_mac.m,$(wildcard devices/*.c))
@@ -170,6 +172,12 @@ $(IB)/libhengetl.a: $(TL_IOS_OBJ) $(TL_SHIM_IOS_OBJ) $(IB)/tl/shim/hk_symbols.o
 	xcrun --sdk iphoneos libtool -static -o $@ $(TL_IOS_OBJ) $(TL_SHIM_IOS_OBJ) $(IB)/tl/shim/hk_symbols.o
 ios-lib: $(IB)/libhengevm.a $(IB)/libhengetl.a
 .PHONY: ios-lib
+
+# ENGINE_DEFS can change the HvCpu layout, so every engine object is rebuilt when it changes: mixing objects
+# built under two settings links without complaint and breaks at run time.
+DEFS_STAMP = $(B)/engine-defs.stamp
+$(shell mkdir -p $(B); [ -f $(DEFS_STAMP) ] && [ "$$(cat $(DEFS_STAMP))" = "$(ENGINE_DEFS)" ] || printf '%s' "$(ENGINE_DEFS)" > $(DEFS_STAMP))
+$(ENGINE) $(DEV) $(IOS_OBJ): $(DEFS_STAMP)
 
 # The app's glue to it (ios/Henge/Native/henge-tl.c) on the Mac: import a disk image, describe what it holds, run a program.
 $(B)/test_tl_glue: tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(TL_SRC) host/jit_region.c | $(B)

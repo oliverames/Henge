@@ -870,7 +870,10 @@ int hv_tlb_refill(HvCpu *cpu, uint64_t va, uint32_t flags) {
     if (w.fsc) return 1;
     HvTlbEntry *e = hv_tlb_ent(cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), table);
     uint64_t tag = write ? e->write_tag : e->read_tag;
-    if (cpu->m->stats_interval) cpu->m->stats.refills++;
+    if (cpu->m->stats_interval) {
+        cpu->m->stats.refills++;
+        cpu->m->stats.refill_map[el][w.block_size <= (1ull << HV_TLB_PAGE_BITS) ? 0 : w.block_size <= (32ull << 20) ? 1 : 2]++;
+    }
     return tag != HV_TLB_INVALID && tag + HV_TLB_ADJ == (va & ~(uint64_t)PAGE_MASK) ? 0 : 1;
 }
 

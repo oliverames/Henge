@@ -33,7 +33,12 @@ static inline uint64_t hv_exec_key(uint64_t page_va, int64_t addend) {
 #define HV_TLB_PAGE_BITS 14
 #define HV_TLB_ADJ 15
 #define HV_TLB_INVALID 0x8080808080808080ull /* what memset(0x80) leaves */
-#define HV_TLB_BITS 14 /* 16384 entries per EL: 256 MB of 16 KB pages (xnu's working set overflowed 64 MB) */
+/* 16384 entries per EL: 256 MB of 16 KB pages (xnu's working set overflowed 64 MB). A build can pick another size
+   (-DHV_TLB_BITS=12) to weigh the table's cache footprint against more refills: each table is 32 << bits bytes. */
+#ifndef HV_TLB_BITS
+#define HV_TLB_BITS 14
+#endif
+_Static_assert(HV_TLB_BITS >= 7 && HV_TLB_BITS <= 14, "a table's offset is added as a multiple of 4 KB (put_tlb_slot), and the HvCpu has room for 14 bits");
 #define HV_TLB_SIZE (1u << HV_TLB_BITS)
 #define HV_IJC_TABLES 16
 #define HV_RET_BITS 13 /* entries in a return table */
