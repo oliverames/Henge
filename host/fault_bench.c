@@ -147,7 +147,8 @@ static void bench_mach(void) {
                               .msgh_remote_port = exc_port, .msgh_id = 1};
     mach_msg(&stop, MACH_SEND_MSG, sizeof stop, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     pthread_join(server, NULL);
-    mach_port_destroy(mach_task_self(), exc_port);
+    mach_port_deallocate(mach_task_self(), exc_port); /* the send right */
+    mach_port_mod_refs(mach_task_self(), exc_port, MACH_PORT_RIGHT_RECEIVE, -1);
     fprintf(stderr, "fault-bench: mach fault %.0f ns/fault (%u faults, %u stray)\n", ns, NPAGES * ROUNDS, stray_exceptions);
 }
 
