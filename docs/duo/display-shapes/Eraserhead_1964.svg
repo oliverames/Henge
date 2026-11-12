@@ -1,0 +1,28 @@
+<svg id="J314-bezels" xmlns="http://www.w3.org/2000/svg" width="301.6446mm" height="195.9097mm" viewBox="0 0 855.0556 555.3346">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: none;
+      }
+    </style>
+  </defs>
+  <path id="menubar-bottom" class="cls-1" d="M.0016,20.9256h855.054"/>
+  <g id="inner-bezel">
+    <path id="inner-bezel-left" class="cls-1" d="M.0016,555.3346V20.9256"/>
+    <path id="inner-bezel-bottom" class="cls-1" d="M855.0556,555.3346H.0016"/>
+    <path id="inner-bezel-right" class="cls-1" d="M855.0556,20.9256v534.409"/>
+    <path id="inner-bezel-topright" class="cls-1" d="M834.1316.0016c1.663,0,7.938-.043,10.989.322,3.178.38,5.155,1.308,6.73,2.883s2.503,3.553,2.883,6.73c.366,3.051.322,9.326.322,10.989"/>
+    <path id="inner-bezel-top2" class="cls-1" d="M483.6926.0016h350.439"/>
+    <g id="inner-bezel-eraserhead">
+      <path id="eraserhead-topright" class="cls-1" d="M479.8386,3.8546c0-2.99.863-3.853,3.854-3.853"/>
+      <path id="eraserhead-right" class="cls-1" d="M479.8386,9.9336V3.8546"/>
+      <path id="eraserhead-bottomright" class="cls-1" d="M471.6746,18.0976c2.578,0,4.638.114,6.458-1.706s1.706-3.88,1.706-6.458"/>
+      <path id="eraserhead-bottom" class="cls-1" d="M383.3836,18.0976h88.291"/>
+      <path id="eraserhead-bottomleft" class="cls-1" d="M375.2186,9.9336c0,2.578-.113,4.638,1.707,6.458s3.88,1.706,6.458,1.706"/>
+      <path id="eraserhead-left" class="cls-1" d="M375.2186,3.8546v6.079"/>
+      <path id="eraserhead-topleft" class="cls-1" d="M371.3656.0016c2.99,0,3.853.863,3.853,3.853"/>
+    </g>
+    <path id="inner-bezel-top1" class="cls-1" d="M20.9256.0016h350.44"/>
+    <path id="inner-bezel-topleft" class="cls-1" d="M.0016,20.9256c0-1.663-.043-7.938.322-10.989.381-3.177,1.309-5.155,2.884-6.73S6.76.7036,9.9366.3236c3.051-.365,9.327-.322,10.989-.322"/>
+  </g>
+</svg>
