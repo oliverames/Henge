@@ -28,6 +28,7 @@ static thread_act_t threads[MAX_THREADS];
 static _Atomic int nthreads;
 static struct { uintptr_t off; uint32_t n; } slots[SLOTS];
 static uint64_t total, idle, jit, other_image, unknown;
+static uint64_t jit_el[2]; /* translated-code samples by the guest EL running (x28 is the HvCpu there) */
 static uintptr_t image_base;
 static int words_on;
 
@@ -106,8 +107,9 @@ static void dump(void) {
     memcpy(sorted, slots, sizeof slots);
     qsort(sorted, SLOTS, sizeof sorted[0], by_count);
     uint64_t busy = total - idle;
-    fprintf(stderr, "hvprof: %llu samples, idle %.1f%%, of busy: jit %.1f%%, other images %.1f%%, base %#lx\n",
+    fprintf(stderr, "hvprof: %llu samples, idle %.1f%%, of busy: jit %.1f%% (el0 %.1f%%, el1 %.1f%%), other images %.1f%%, base %#lx\n",
             (unsigned long long)total, total ? 100.0 * idle / total : 0, busy ? 100.0 * jit / busy : 0,
+            busy ? 100.0 * jit_el[0] / busy : 0, busy ? 100.0 * jit_el[1] / busy : 0,
             busy ? 100.0 * other_image / busy : 0, (unsigned long)image_base);
     for (int i = 0; i < 40 && sorted[i].n; i++)
         fprintf(stderr, "hvprof: %5.2f%% +%#lx\n", busy ? 100.0 * sorted[i].n / busy : 0, (unsigned long)sorted[i].off);
@@ -120,6 +122,7 @@ static void dump(void) {
     memset(other, 0, sizeof other);
     memset(slots, 0, sizeof slots);
     total = idle = jit = other_image = unknown = 0;
+    jit_el[0] = jit_el[1] = 0;
 }
 
 static void *sampler(void *unused) {
@@ -143,6 +146,10 @@ static void *sampler(void *unused) {
             uintptr_t pc = (uintptr_t)arm_thread_state64_get_pc(st);
             if (pc >= lo && pc < hi) {
                 jit++;
+                /* Translated code keeps the HvCpu in x28; count it only if it is one of the machine's. */
+                uintptr_t x28 = (uintptr_t)st.__x[28];
+                for (int c = 0; c < m->ncpus && c < HV_MAX_CPUS; c++)
+                    if ((uintptr_t)m->cpus[c] == x28) { jit_el[m->cpus[c]->el ? 1 : 0]++; break; }
                 if (words_on) count_word(*(const volatile uint32_t *)(pc + (uintptr_t)m->jit.rw_diff)); /* the writable alias: always readable */
             } else count_host(pc);
         }
