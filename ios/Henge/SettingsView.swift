@@ -51,6 +51,9 @@ struct SettingsView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     LabeledContent("Code region", value: "\(JITBootstrap.jitBytes >> 20) MB, claimed once per launch")
+                    LabeledContent("Trusted Execution Monitor", value: TXMDetection.fromDeviceTree == nil
+                                   ? (JITBootstrap.deviceEnforcesTXM ? "Expected for this model" : "Not expected for this model")
+                                   : (JITBootstrap.deviceEnforcesTXM ? "Present" : "Not present"))
                 }
                 .listRowBackground(Desk.card)
                 Section("Memory") {
