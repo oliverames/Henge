@@ -217,6 +217,9 @@ final class HardwareMouse {
     private var lastScrollFirst: Float = 0, lastScrollSecond: Float = 0
     private var lastRoute: Bool?
     private var movesLogged = 0
+    /// Mice passing through a vendor channel. With AssistiveTouch on, iOS also hands GameController what such a
+    /// mouse doesn't divert (left and right clicks on an MX Master), which would press each button twice.
+    private var vendorChannels: Set<UUID> = []
 
     func start() {
         if started { stop() } // again after a boot: fresh settings, and one set of observers
@@ -295,15 +298,27 @@ final class HardwareMouse {
         mouse.handlerQueue = queue
         let aux = input.auxiliaryButtons?.count ?? 0
         HengeLog.log("input", "mouse: \(mouse.vendorName ?? "?"), right button \(input.rightButton != nil), middle \(input.middleButton != nil), more buttons \(aux)")
-        input.mouseMovedHandler = { [weak self] _, dx, dy in self?.moved(dx, dy) }
-        input.leftButton.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(0, pressed) }
-        input.rightButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(1, pressed) }
-        input.middleButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(2, pressed) }
+        HengeLog.log("input", "mouse: AssistiveTouch \(UIAccessibility.isAssistiveTouchRunning ? "on" : "off")")
+        // An iPhone hands GameController a mouse's input only while AssistiveTouch runs, and then this is the
+        // route for any mouse or trackpad: raw motion, not AssistiveTouch's pointer, which the trackpad ignores.
+        input.mouseMovedHandler = { [weak self] _, dx, dy in
+            guard let self, self.vendorChannels.isEmpty else { return }
+            self.moved(dx, dy)
+        }
+        input.leftButton.pressedChangedHandler = { [weak self] _, _, pressed in self?.gcButton(0, pressed) }
+        input.rightButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.gcButton(1, pressed) }
+        input.middleButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.gcButton(2, pressed) }
         // The first two extra buttons are a mouse's side buttons: the USB mouse's back and forward.
         for (i, extra) in (input.auxiliaryButtons ?? []).prefix(2).enumerated() {
-            extra.pressedChangedHandler = { [weak self] _, _, pressed in self?.sideButton(UInt32(3 + i), pressed) }
+            extra.pressedChangedHandler = { [weak self] _, _, pressed in
+                guard let self, self.vendorChannels.isEmpty else { return }
+                self.sideButton(UInt32(3 + i), pressed)
+            }
         }
-        input.scroll.valueChangedHandler = { [weak self] _, first, second in self?.scrolled(first, second) }
+        input.scroll.valueChangedHandler = { [weak self] _, first, second in
+            guard let self, self.vendorChannels.isEmpty else { return }
+            self.scrolled(first, second)
+        }
         // Whether GameController delivers anything for this mouse: an iPhone announces a mouse it may never pass on.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak mouse] in
             guard let self, let mouse else { return }
@@ -323,7 +338,23 @@ final class HardwareMouse {
         }
     }
 
+    private func gcButton(_ physicalButton: Int32, _ pressed: Bool) {
+        // A release still goes through, so nothing pressed before a vendor channel opened stays down.
+        guard vendorChannels.isEmpty || !pressed else { return }
+        button(physicalButton, pressed)
+    }
+
     // MARK: A mouse read through its maker's own channel (VendorMice), on any thread
+
+    /// A vendor channel opened or closed for this mouse; while any is open, GameController's copy is ignored.
+    func vendorChannel(_ id: UUID, open: Bool) {
+        queue.async { [self] in
+            if open { vendorChannels.insert(id) } else { vendorChannels.remove(id) }
+        }
+    }
+
+    /// Whether any mouse passes through a vendor channel now. Main thread.
+    var hasVendorChannel: Bool { queue.sync { !vendorChannels.isEmpty } }
 
     /// Raw sensor counts, Y down, unscaled: the Mac's USB mouse gets what a real Mac would, and macOS sets the feel.
     func vendorMoved(_ dx: Int32, _ dy: Int32) {

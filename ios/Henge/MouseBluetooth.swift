@@ -97,6 +97,7 @@ final class VendorMice: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         HengeLog.log("mouse-bt", "Bluetooth state \(central.state.rawValue)")
         if central.state == .poweredOn { scan() } else {
+            for id in drivers.keys { HardwareMouse.shared.vendorChannel(id, open: false) }
             drivers.removeAll()
             known.removeAll()
             HardwareMouse.shared.releaseButtons()
@@ -117,6 +118,7 @@ final class VendorMice: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard known[peripheral.identifier] != nil else { return }
         HengeLog.log("mouse-bt", "\(peripheral.name ?? "?") disconnected: \(error?.localizedDescription ?? "-")")
         drivers[peripheral.identifier] = nil
+        HardwareMouse.shared.vendorChannel(peripheral.identifier, open: false)
         HardwareMouse.shared.releaseButtons()
         // A mouse that slept: this request waits for it to come back, and diversion is set up again then.
         if wanted { central.connect(peripheral) }
@@ -208,6 +210,7 @@ final class HIDPPMouse {
         guard pending == nil else { return }
         HengeLog.log("mouse-hidpp", "\(name): setting up; longest write \(peripheral.maximumWriteValueLength(for: .withResponse)) with response, \(peripheral.maximumWriteValueLength(for: .withoutResponse)) without")
         active = false
+        HardwareMouse.shared.vendorChannel(peripheral.identifier, open: false)
         diverted.removeAll()
         analytics.removeAll()
         heldDiverted.removeAll()
@@ -290,6 +293,7 @@ final class HIDPPMouse {
     private func setUpWheels() {
         let finish = { [self] in
             active = true
+            HardwareMouse.shared.vendorChannel(peripheral.identifier, open: true)
             HengeLog.log("mouse-hidpp", "\(name): passing through (\(diverted.count) controls, wheel \(wheelIndex != 0), thumbwheel \(thumbIndex != 0))")
         }
         let thumb = { [self] in
@@ -307,6 +311,7 @@ final class HIDPPMouse {
 
     /// Hands the mouse back to iOS. Writes without waiting for answers, so it works on the way out of the app.
     func restore() {
+        HardwareMouse.shared.vendorChannel(peripheral.identifier, open: false)
         guard !diverted.isEmpty || active else { return }
         active = false
         for cid in diverted {

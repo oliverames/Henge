@@ -34,6 +34,7 @@ struct SessionView: View {
     @State private var controlsHidden = false
     @State private var showRevealHint = false
     @State private var pointerRefused = false
+    @State private var mouseNeedsAssistiveTouch = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
     @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
     @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
@@ -111,6 +112,16 @@ struct SessionView: View {
                             .transition(.opacity)
                             .allowsHitTesting(false)
                     }
+                    if mouseNeedsAssistiveTouch && !pointerRefused && !showRevealHint {
+                        Label("Turn on AssistiveTouch to use this mouse with the Mac", systemImage: "computermouse")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18).padding(.vertical, 12)
+                            .deskGlass(in: Capsule())
+                            .position(x: full.width / 2, y: insets.top + 40)
+                            .transition(.opacity)
+                            .allowsHitTesting(false)
+                    }
                     if showRevealHint {
                         Label("Tap with four fingers to show the controls", systemImage: "hand.tap")
                             .font(.system(size: 15, weight: .medium))
@@ -149,12 +160,21 @@ struct SessionView: View {
             .animation(.easeInOut(duration: 0.25), value: typing)
             .animation(.easeInOut(duration: 0.25), value: controlsHidden)
             .animation(.easeInOut(duration: 0.25), value: showRevealHint)
+            .animation(.easeInOut(duration: 0.25), value: mouseNeedsAssistiveTouch)
             .animation(.easeInOut(duration: 0.25), value: showWallpaperTip)
             .onReceive(NotificationCenter.default.publisher(for: UIPointerLockState.didChangeNotification)) { _ in
                 pointerRefused = PointerLock.refused
             }
             .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidConnect)) { _ in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pointerRefused = PointerLock.refused }
+                // An iPhone gives an app a mouse only through AssistiveTouch, unless Henge reads it over its maker's
+                // own channel (a Logitech mouse). Give that channel time to open before saying so.
+                guard !Device.isPad else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                    guard !UIAccessibility.isAssistiveTouchRunning, !HardwareMouse.shared.hasVendorChannel else { return }
+                    mouseNeedsAssistiveTouch = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 6) { mouseNeedsAssistiveTouch = false }
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: Trackpad.revealTap)) { _ in
                 controlsHidden = false
