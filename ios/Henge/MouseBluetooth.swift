@@ -164,6 +164,7 @@ final class HIDPPMouse {
         case reprogControls = 0x1B04
         case hiresWheel = 0x2121
         case thumbwheel = 0x2150
+        case wirelessStatus = 0x1D4B
     }
 
     private struct Control {
@@ -174,21 +175,20 @@ final class HIDPPMouse {
 
     /// The software id in each request. A notification carries 0, so a reply is told from an event by it.
     private static let softwareID: UInt8 = 0x0A
-    private static let deviceIndex: UInt8 = 0xFF
 
     private let peripheral: CBPeripheral
     private let report: CBCharacteristic
     private let queue: DispatchQueue
     private var name: String { peripheral.name ?? "Logitech mouse" }
 
-    /// Whether the channel carries the report id byte. The BLE framing isn't documented: the first request
-    /// goes without it, and if nothing answers, the rest go with it.
-    private var withReportID = false
+    /// On Bluetooth LE a HID++ message is 18 bytes: feature index, function and software id, then 16 bytes of
+    /// parameters. It has no report id and no device index; the characteristic refuses a 19- or 20-byte write.
+    private static let frameLength = 18
     private var pending: (feature: UInt8, function: UInt8, attempt: Int, done: (Data?) -> Void, payload: [UInt8])?
     private var timeout: DispatchWorkItem?
     private var framesLogged = 0
 
-    private var reprogIndex: UInt8 = 0, wheelIndex: UInt8 = 0, thumbIndex: UInt8 = 0
+    private var reprogIndex: UInt8 = 0, wheelIndex: UInt8 = 0, thumbIndex: UInt8 = 0, statusIndex: UInt8 = 0
     private var controls: [Control] = []
     private var diverted: [UInt16] = []      // controls set to divert, raw XY or analytics, to undo
     private var analytics: [UInt16] = []
@@ -205,7 +205,19 @@ final class HIDPPMouse {
     // MARK: Set up
 
     func begin() {
-        HengeLog.log("mouse-hidpp", "\(name): setting up")
+        guard pending == nil else { return }
+        HengeLog.log("mouse-hidpp", "\(name): setting up; longest write \(peripheral.maximumWriteValueLength(for: .withResponse)) with response, \(peripheral.maximumWriteValueLength(for: .withoutResponse)) without")
+        active = false
+        diverted.removeAll()
+        analytics.removeAll()
+        heldDiverted.removeAll()
+        feature(.wirelessStatus) { [self] index in
+            statusIndex = index
+            discover()
+        }
+    }
+
+    private func discover() {
         feature(.reprogControls) { [self] index in
             reprogIndex = index
             feature(.hiresWheel) { [self] index in
@@ -323,8 +335,7 @@ final class HIDPPMouse {
         guard let p = pending else { return }
         pending = nil
         if p.attempt == 0 {
-            withReportID.toggle()
-            HengeLog.log("mouse-hidpp", "\(name): no answer; trying \(withReportID ? "with" : "without") the report id")
+            HengeLog.log("mouse-hidpp", "\(name): no answer; asking again")
             request(p.feature, p.function, p.payload, attempt: 1, done: p.done)
         } else {
             HengeLog.log("mouse-hidpp", "\(name): no answer to feature \(p.feature) function \(p.function)")
@@ -333,30 +344,33 @@ final class HIDPPMouse {
     }
 
     private func send(_ feature: UInt8, _ function: UInt8, _ params: [UInt8]) {
-        var frame: [UInt8] = withReportID ? [0x11] : []
-        frame += [Self.deviceIndex, feature, function << 4 | Self.softwareID]
-        frame += params + [UInt8](repeating: 0, count: max(0, 16 - params.count))
+        var frame: [UInt8] = [feature, function << 4 | Self.softwareID] + params
+        frame += [UInt8](repeating: 0, count: max(0, Self.frameLength - frame.count))
         logFrame("out", frame)
         peripheral.writeValue(Data(frame), for: report, type: .withResponse)
     }
 
     func received(_ data: Data) {
-        var bytes = [UInt8](data)
+        let bytes = [UInt8](data)
         logFrame("in", bytes)
-        // A report id first (0x10 short, 0x11 long), when the mouse sends one.
-        // Without one, the first byte is the device index, which is never 0x10 or 0x11.
-        if bytes.count >= 4, bytes[0] == 0x10 || bytes[0] == 0x11 { bytes.removeFirst() }
-        guard bytes.count >= 3 else { return }
-        let feature = bytes[1], fnsw = bytes[2]
-        let params = Data(bytes.dropFirst(3))
+        guard bytes.count >= 2 else { return }
+        let feature = bytes[0], fnsw = bytes[1]
+        let params = Data(bytes.dropFirst(2))
 
-        if feature == 0xFF, let p = pending, bytes.count >= 5, bytes[2] == p.feature, bytes[3] >> 4 == p.function {
-            HengeLog.log("mouse-hidpp", String(format: "\(name): error 0x%02X from feature %d function %d", bytes[4], p.feature, p.function))
+        // An error: 0xFF, then the request's feature index and function byte, then the error code.
+        if feature == 0xFF, let p = pending, bytes.count >= 4, bytes[1] == p.feature, bytes[2] >> 4 == p.function {
+            HengeLog.log("mouse-hidpp", String(format: "\(name): error 0x%02X from feature %d function %d", bytes[3], p.feature, p.function))
             finish(nil)
             return
         }
         if fnsw & 0x0F == Self.softwareID, let p = pending, feature == p.feature, fnsw >> 4 == p.function {
             finish(params)
+            return
+        }
+        // The mouse asks to be set up again after it reconnects or wakes (wireless status: reconfiguration needed).
+        if fnsw & 0x0F == 0, feature == statusIndex, statusIndex != 0, params.count >= 2, params[1] == 1 {
+            HengeLog.log("mouse-hidpp", "\(name): asks to be set up again")
+            begin()
             return
         }
         if fnsw & 0x0F == 0, feature != 0, active { event(feature, fnsw >> 4, [UInt8](params)) }
