@@ -397,9 +397,18 @@ static void put_branch_exit(Emit *e, uint64_t target, int plain) {
     uint32_t slot_index = ~0u;
     int same_page = (target & ~((1ull << HV_TLB_PAGE_BITS) - 1)) == e->page;
     uint64_t xa = same_page ? 0 : cross_addend(e, target);
-    if (same_page || xa) {
-        slot_index = __atomic_fetch_add(&e->m->nslots, 1, __ATOMIC_RELAXED); /* translations run in parallel */
-        if (slot_index >= e->m->max_slots) slot_index = ~0u; /* out of slots until the next flush: no chaining */
+    /* Only an exit the block keeps a site for (nsite) gets a slot: placing records where its code is, which is how
+       an eviction knows the slot is free again once that code is gone. */
+    if ((same_page || xa) && e->nsite < MAX_OOL) {
+        /* Translations run in parallel. The counters are looked at before they are bumped, so that a long run with
+           no eviction or flush cannot take them round past 2^32 and hand out a slot in use. */
+        HvMachine *m = e->m;
+        uint32_t k = __atomic_load_n(&m->slot_take, __ATOMIC_RELAXED) < m->nslot_free ? __atomic_fetch_add(&m->slot_take, 1, __ATOMIC_RELAXED) : ~0u;
+        if (k < m->nslot_free) slot_index = m->slot_free[k]; /* freed by the last eviction */
+        else if (__atomic_load_n(&m->nslots, __ATOMIC_RELAXED) < m->max_slots) {
+            slot_index = __atomic_fetch_add(&m->nslots, 1, __ATOMIC_RELAXED);
+            if (slot_index >= m->max_slots) slot_index = ~0u;
+        } /* else out of slots until an eviction or flush: no chaining */
     }
     if (slot_index == ~0u) {
         /* Another page may be remapped under us, so look it up by VA instead of chaining. */
@@ -2040,13 +2049,16 @@ static __thread struct {
     HvMachine *m;
     uint64_t gen;
     uint32_t *hot, *cold;
+    uint32_t seg, epoch;  /* the ring segment it is in, and that segment's epoch then (taken back since: gone) */
 } chunk;
 
 static int chunk_take(HvMachine *m, uint32_t hot, uint32_t cold, uint32_t **hot_at, uint32_t **cold_at) {
     uint64_t gen = __atomic_load_n(&m->jit_gen, __ATOMIC_SEQ_CST);
-    if (chunk.m != m || chunk.gen != gen || !chunk.hot || (size_t)(chunk.cold - chunk.hot) < (size_t)hot + cold) {
+    if (chunk.m != m || chunk.gen != gen || !chunk.hot || (size_t)(chunk.cold - chunk.hot) < (size_t)hot + cold ||
+        (m->jit.seg_words && m->jit.seg_epoch[chunk.seg] != chunk.epoch)) {
         size_t want = JIT_CHUNK_WORDS;
         if (want > m->jit.capacity) want = m->jit.capacity;
+        if (m->jit.seg_words && want > m->jit.seg_words) want = m->jit.seg_words;
         if (want < (size_t)hot + cold) want = (size_t)hot + cold;
         uint32_t *p = hv_jit_reserve(&m->jit, want);
         if (!p) {
@@ -2054,6 +2066,10 @@ static int chunk_take(HvMachine *m, uint32_t hot, uint32_t cold, uint32_t **hot_
             return -1;
         }
         chunk.m = m, chunk.gen = gen, chunk.hot = p, chunk.cold = p + ((want + 1) & ~(size_t)1);
+        if (m->jit.seg_words) {
+            chunk.seg = (uint32_t)((size_t)(p - m->jit.base) / m->jit.seg_words);
+            chunk.epoch = m->jit.seg_epoch[chunk.seg];
+        }
     }
     *hot_at = chunk.hot;
     chunk.hot += hot;

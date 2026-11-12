@@ -371,6 +371,15 @@ char *henge_share_take_clipboard(void) { return hv_share_take_clipboard(); }
 long henge_share_agent_seen(void) { return hv_share_agent_seen(); }
 
 void henge_vm_set_display(uint32_t width, uint32_t height) { hv_pvg_lite_set_mode(width, height); }
+void henge_vm_set_display_live(uint32_t width, uint32_t height, float px_per_mm) {
+    hv_pvg_lite_set_mode_density(width, height, px_per_mm);
+}
+int henge_vm_display_size(uint32_t *width, uint32_t *height) {
+    if (!lock_running()) return -1;
+    int result = hv_vm_display_size(width, height);
+    pthread_rwlock_unlock(&api_lock);
+    return result;
+}
 void henge_vm_set_display_mm(uint32_t width_mm, uint32_t height_mm) { hv_pvg_lite_set_size_mm(width_mm, height_mm); }
 
 void henge_vm_key(uint16_t code, int down) {
@@ -397,6 +406,32 @@ void henge_vm_mouse_scroll(int dx, int dy) {
     if (!lock_running()) return;
     if (dy) hv_vm_mouse_wheel(dy);
     if (dx) hv_vm_mouse_hwheel(dx);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_audio_kick(void) {
+    if (!lock_running()) return;
+    hv_vm_audio_kick();
+    pthread_rwlock_unlock(&api_lock);
+}
+int henge_vm_usb_mouse_ready(void) {
+    if (!lock_running()) return 0;
+    int ready = hv_vm_usb_mouse_ready();
+    pthread_rwlock_unlock(&api_lock);
+    return ready;
+}
+void henge_vm_usb_mouse_move(int dx, int dy) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_move(dx, dy);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_usb_mouse_scroll(int wheel, int pan) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_scroll(wheel, pan);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_usb_mouse_buttons(unsigned buttons) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_buttons(buttons);
     pthread_rwlock_unlock(&api_lock);
 }
 int henge_vm_pointer(int *x, int *y) {

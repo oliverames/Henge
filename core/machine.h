@@ -65,10 +65,12 @@ typedef struct HvBlock {
 #define HV_MAX_BLOCKS (3 << 20) /* a macOS boot runs well over a million distinct blocks; a full flush retranslates them all */
 #define HV_PROF_RING (1 << 16)
 #define HV_MAX_SLOTS (6 << 20)  /* chainable exits: about two per block */
+#define HV_FLUSH_EVICT 2        /* flush_pending: the code cache is full; taking back its oldest segment will do */
 
 /* Counters for --stats: where the time goes. */
 typedef struct HvStats {
     uint64_t blocks, translations, block_flushes;
+    uint64_t evictions, evict_ticks, evict_blocks, evict_unchained; /* code-cache segments taken back, host ticks it took, blocks dropped, chained exits undone */
     uint64_t flush_smc, flush_ic, flush_full;  /* why translations were dropped */
     uint64_t chained, ijc_fills, ijc_resets;
     uint64_t xchained;
@@ -229,7 +231,7 @@ typedef struct HvMachine {
     HvBlock *blocks;
     int nblocks;
     uint32_t max_blocks, max_slots; /* sized from the JIT region (machine.c) */
-    int flush_pending;   /* set by helpers; the dispatcher flushes once the block has left */
+    int flush_pending;   /* set by helpers; the dispatcher flushes once the block has left. HV_FLUSH_EVICT: only room is needed */
 
     void *gic;
     /* Devices: called between blocks every so often and while the CPU waits.
@@ -266,7 +268,11 @@ typedef struct HvMachine {
        HvRam.xhead through slot_xnext (slot + 1, 0 at the end); a slot is on one at a time, until the page's code changes. */
     uint64_t *slot_xa, *slot_xpa;
     uint32_t *slot_xnext, nxchained;
-    uint32_t nslots;
+    uint32_t nslots;         /* slots ever handed out since the last full flush (may run past max_slots) */
+    /* Slots freed when a code-cache segment was taken back (their exits went with it), handed out again before new
+       ones: slot_free[slot_take++] while slot_take < nslot_free. Only changed with every CPU stopped. */
+    uint32_t *slot_free, nslot_free, slot_take;
+    uint32_t blocks_wrap;    /* blocks[0, blocks_wrap) were placed before the ring last came round (hv_block_at) */
     HvCpu *cpu;              /* CPU 0: the one that polls devices */
     HvCpu *cpus[HV_MAX_CPUS]; /* every CPU, so device and invalidation code can ask them to leave */
     int ncpus;
@@ -301,7 +307,7 @@ static inline uint32_t hv_block_hash(uint64_t va, uint64_t pa, uint32_t flags) {
     return (uint32_t)(h ^ (h >> 29)) & (HV_BLOCK_HASH - 1);
 }
 
-/* Lock-free: blocks are only added (release store) until a flush, which stops every CPU. */
+/* Lock-free: blocks are only added (release store) until a flush or an eviction, which stop every CPU. */
 static inline HvBlock *hv_block_find(HvMachine *m, uint32_t h, uint64_t va, uint64_t pa, uint32_t flags, uint32_t gen) {
     for (HvBlock *b = __atomic_load_n(&m->hash[h], __ATOMIC_ACQUIRE); b; b = __atomic_load_n(&b->next, __ATOMIC_ACQUIRE))
         if (b->va == va && b->pa == pa && b->flags == flags && b->gen == gen) return b;
@@ -318,6 +324,9 @@ int hv_machine_add_mmio(HvMachine *m, uint64_t pa, uint64_t size, void *opaque,
                         void (*write)(void *, uint64_t, uint64_t, unsigned), const char *name);
 
 HvRam *hv_ram_lookup(HvMachine *m, uint64_t pa);
+/* Diagnostics: the block whose code starts at or before host address pc (nearest), or NULL. */
+HvBlock *hv_block_at(HvMachine *m, const uint32_t *pc);
+
 /* Drop the translations made from the RAM page holding pa (it was written, or the guest invalidated it). */
 void hv_invalidate_code(HvMachine *m, uint64_t pa);
 void hv_ret_clear(HvCpu *cpu);
@@ -325,7 +334,7 @@ int hv_ic_ivau_drops(void);
 /* Settings that say how to translate or wait, to compare ways of doing it in one running guest
    ("knob NAME VALUE" in HV_INPUT_FILE; a new way starts from an empty code cache). Each starts
    from the environment variable named in hv_knob_names. */
-enum { HV_K_NO_RAS, HV_K_SUPERBLOCKS, HV_K_GROUPS, HV_K_WFI_SPIN, HV_K_FLUSH, HV_K_TEST1, HV_K_TEST2, HV_K_TEST3, HV_K_TLBT, HV_K_JITCAP, HV_K_RECHECK, HV_K_SYNCWAIT, HV_K_SWITCHFLUSH, HV_K_RANGEDROP, HV_K_MOVIMM, HV_K_PREDSTAT, HV_K_WALKLOG, HV_K_HOIST, HV_K_IJCPAGES, HV_K_DNSPROXY, HV_K_COUNT };
+enum { HV_K_NO_RAS, HV_K_SUPERBLOCKS, HV_K_GROUPS, HV_K_WFI_SPIN, HV_K_FLUSH, HV_K_TEST1, HV_K_TEST2, HV_K_TEST3, HV_K_TLBT, HV_K_JITCAP, HV_K_RECHECK, HV_K_SYNCWAIT, HV_K_SWITCHFLUSH, HV_K_RANGEDROP, HV_K_MOVIMM, HV_K_PREDSTAT, HV_K_WALKLOG, HV_K_HOIST, HV_K_IJCPAGES, HV_K_DNSPROXY, HV_K_JITSEGS, HV_K_COUNT };
 extern int hv_knob[HV_K_COUNT];
 int hv_knob_set(HvMachine *m, const char *name, int value);
 /* Debugging (HV_WATCH): which pages keep losing their translations. */

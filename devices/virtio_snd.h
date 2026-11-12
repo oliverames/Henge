@@ -29,6 +29,9 @@ typedef struct HvVirtioSndBackend {
     /* Called on the CPU thread. Return 0 if the host can play this. */
     int (*start)(void *opaque, unsigned channels, unsigned format, unsigned rate_hz);
     void (*stop)(void *opaque);
+    /* Optional, CPU thread: throw the host's player away, so the next start builds a new one
+       (after an interruption or a media services reset, the old one may never play again). */
+    void (*reset)(void *opaque);
     void *opaque;
 } HvVirtioSndBackend;
 
@@ -48,12 +51,22 @@ typedef struct HvVirtioSnd {
     uint64_t pending_end[HV_VSND_PENDING]; /* `written` after this buffer's data */
     uint32_t phead, pcopy, ptail; /* pcopy: next one whose audio is not yet in the ring */
     uint64_t underruns, xfers;
+    /* The host's player for a running stream: playing, or failed and to be tried again at
+       host_retry_ns (the clock drains the ring meanwhile). A failure is not for good: iOS refuses
+       to start audio during a call or before the app's session is active, and plays again after. */
+    int host_on;
+    uint32_t host_failures;
+    uint64_t host_retry_ns;
+    _Atomic int host_kick; /* any thread: start the host's player again from scratch */
 } HvVirtioSnd;
 
 HvVirtioSnd *hv_virtio_snd_create(HvMachine *m, HvPcie *bus);
 /* CPU thread, each tick: return played buffers to the guest. */
 void hv_virtio_snd_poll(HvVirtioSnd *d);
 void hv_virtio_snd_resume(HvVirtioSnd *d);
+/* Any thread: the host's audio came back (an interruption ended, the route changed, media services
+   were reset): the CPU thread rebuilds the host's player for a running stream at its next poll. */
+void hv_virtio_snd_kick(HvVirtioSnd *d);
 /* Backend thread: take up to `len` bytes of PCM; the rest of `buf` is silence. Returns bytes taken. */
 uint32_t hv_virtio_snd_pull(HvVirtioSnd *d, void *buf, uint32_t len);
 

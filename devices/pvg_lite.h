@@ -56,6 +56,10 @@ int hv_pvg_trace_on(void);
 /* The size macOS is told its screen is. Set before the machine starts; default 1920 x 1080. */
 void hv_pvg_lite_set_mode(uint32_t width, uint32_t height);
 void hv_pvg_lite_set_size_mm(uint32_t width_mm, uint32_t height_mm);
+/* Both at once, for a running Mac: a size and its pixels per mm (0 for the 400 mm default), told together. */
+void hv_pvg_lite_set_mode_density(uint32_t width, uint32_t height, float px_per_mm);
+/* The mode the guest acked last: 0, or -1 before it has acked one. Any thread. */
+int hv_pvg_lite_display_mode(HvPvgLite *p, uint32_t *width, uint32_t *height);
 
 /* Instant resume (host/snapshot.c). State blobs: called with out NULL they return the size needed. */
 size_t hv_pvg_lite_state(HvPvgLite *p, void *out, size_t cap);

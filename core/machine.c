@@ -21,7 +21,7 @@ extern void hv_xjump_thunk(void);
 static int init_rest(HvMachine *m);
 
 int hv_knob[HV_K_COUNT];
-static const char *const hv_knob_names[HV_K_COUNT] = {"HV_NO_RAS", "HV_SUPERBLOCKS", "HV_GROUPS", "HV_WFI_SPIN", "HV_FLUSH", "HV_K1", "HV_K2", "HV_K3", "HV_TLBT", "HV_JIT_CAP", "HV_RECHECK", "HV_SYNC_WAIT", "HV_SWITCH_FLUSH", "HV_RANGE_DROP", "HV_MOVIMM", "HV_PREDSTAT", "HV_WALK_LOG", "HV_HOIST_CHECK", "HV_IJC_PAGES", "HV_DNS_PROXY"};
+static const char *const hv_knob_names[HV_K_COUNT] = {"HV_NO_RAS", "HV_SUPERBLOCKS", "HV_GROUPS", "HV_WFI_SPIN", "HV_FLUSH", "HV_K1", "HV_K2", "HV_K3", "HV_TLBT", "HV_JIT_CAP", "HV_RECHECK", "HV_SYNC_WAIT", "HV_SWITCH_FLUSH", "HV_RANGE_DROP", "HV_MOVIMM", "HV_PREDSTAT", "HV_WALK_LOG", "HV_HOIST_CHECK", "HV_IJC_PAGES", "HV_DNS_PROXY", "HV_JIT_SEGMENTS"};
 
 static void knobs_init(void) {
     for (int i = 0; i < HV_K_COUNT; i++)
@@ -93,6 +93,7 @@ static int init_rest(HvMachine *m) {
     hv_knob[HV_K_DNSPROXY] = getenv("HV_DNS_PROXY") ? atoi(getenv("HV_DNS_PROXY")) : 1;
     /* So the tests can run the translator these ways too (the iOS and --phone paths read them in knobs_init). */
     if (getenv("HV_SUPERBLOCKS")) hv_knob[HV_K_SUPERBLOCKS] = atoi(getenv("HV_SUPERBLOCKS"));
+    if (getenv("HV_JIT_SEGMENTS")) hv_knob[HV_K_JITSEGS] = atoi(getenv("HV_JIT_SEGMENTS"));
     /* The exact check for an access in a page's last 15 bytes, in the access's out-of-line path (code size only):
        on the phone, Golden Gate's boot and login send 80-240K such accesses a second to the helper without it. It
        costs ~13% of the code (Mac 2026-11-09: 296-300 against 259-261 bytes a block), and the phone's code cache
@@ -116,6 +117,12 @@ static int init_rest(HvMachine *m) {
     m->slot_xa = calloc(m->max_slots, sizeof *m->slot_xa);
     m->slot_xpa = calloc(m->max_slots, sizeof *m->slot_xpa);
     m->slot_xnext = calloc(m->max_slots, sizeof *m->slot_xnext);
+    m->slot_free = calloc(m->max_slots, sizeof *m->slot_free);
+    if (!m->slot_free) return -1;
+    /* HV_JIT_SEGMENTS: the code cache is a ring of this many segments (default 8; 1: no ring, a full region drops
+       everything). The boot of macOS 27 on a phone fills 1.5 GB in about three minutes and kept doing so: dropping
+       it all meant translating the whole working set again each time. */
+    hv_jit_ring(&m->jit, hv_knob[HV_K_JITSEGS] ? (uint32_t)hv_knob[HV_K_JITSEGS] : 8);
     if (!m->slots || !m->slot_site || !m->slot_stub || !m->slot_cond || !m->slot_xa || !m->slot_xpa || !m->slot_xnext) return -1;
     for (int i = 0; i < HV_MAX_CPUS; i++) { /* untouched pages cost nothing, so every CPU gets its tables now */
         HvPerCpu *p = &m->percpu[i];
@@ -404,6 +411,7 @@ void hv_machine_free(HvMachine *m) {
     free(m->slot_xa);
     free(m->slot_xpa);
     free(m->slot_xnext);
+    free(m->slot_free);
     if (m->locks_initialized) {
         pthread_mutex_destroy(&m->big_mu);
         pthread_cond_destroy(&m->big_cv);
@@ -450,6 +458,26 @@ HvRam *hv_ram_lookup(HvMachine *m, uint64_t pa) {
         if (pa - r->pa < r->size) return r;
     }
     return NULL;
+}
+
+HvBlock *hv_block_at(HvMachine *m, const uint32_t *pc) {
+    /* Blocks are in the order they were made, which is the order of their code except where the ring came round:
+       [0, blocks_wrap) are the older ones, at or past the ring's end. Nearest, not exact: CPUs place code in chunks of
+       their own, so neighbours in the list can be out of order by up to a chunk. */
+    int n = m->nblocks, wrap = (int)m->blocks_wrap;
+    if (wrap > n) wrap = n;
+    int lo = 0, hi = n - 1;
+    if (m->jit.seg_words && wrap) {
+        if (pc >= m->jit.base + m->jit.end) hi = wrap - 1;
+        else lo = wrap;
+    }
+    if (lo > hi) return NULL;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (m->blocks[mid].code && m->blocks[mid].code <= pc) lo = mid;
+        else hi = mid - 1;
+    }
+    return &m->blocks[lo];
 }
 
 uint32_t *hv_smc_counts;

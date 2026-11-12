@@ -56,7 +56,8 @@ struct SessionView: View {
             let full = CGSize(width: geo.size.width + insets.leading + insets.trailing,
                               height: geo.size.height + insets.top + insets.bottom)
             let landscape = full.width > full.height
-            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: mac.aspect)
+            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: aspect)
+            let space = Layout.space(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing)
             ZStack(alignment: .topLeading) {
                 (landscape || zoomed ? Color.black : Desk.page)
                 // One view in every layout: it holds the layer the engine draws into.
@@ -159,8 +160,12 @@ struct SessionView: View {
                 controlsHidden = false
                 showRevealHint = false
             }
-            .onAppear { shown = layout.shown }
+            .onAppear {
+                shown = layout.shown
+                wantSize(space)
+            }
             .onChange(of: layout.shown) { shown = $0 }
+            .onChange(of: space) { wantSize($0) }
         }
         .statusBarHidden(zoomed || Device.isPad)
         .persistentSystemOverlays(.hidden)
@@ -195,11 +200,14 @@ struct SessionView: View {
         }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
+            MacShortcuts.setMacOnScreen(true)
+            HengeAudio.shared.activate()
             HardwareMouse.shared.start()
             VolumeClicks.shared.start()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
+            MacShortcuts.setMacOnScreen(false)
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()
@@ -209,6 +217,17 @@ struct SessionView: View {
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task(id: bootAttempt) { await run() }
         .task { await Sharing.followMacClipboard() }
+    }
+
+    /// The shape of the Mac's screen now: what macOS took last, which can differ from the Mac's setting once it
+    /// follows the space it is shown in.
+    private var aspect: CGFloat { display.aspect ?? mac.aspect }
+    private var macScreen: (width: Int, height: Int) { display.screen.map { ($0.width, $0.height) } ?? mac.screen }
+
+    /// The Mac's screen follows the space it has on this device: a rotation, a fold or unfold, a window resized.
+    private func wantSize(_ space: CGSize?) {
+        let scale = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen.scale }.first ?? 2
+        display.want(space.flatMap { DisplayRouter.Size.fitting($0, scale: scale, retina: mac.isRetina) })
     }
 
     /// When there is something of the app's to point at, iPadOS gets its own pointer back.
@@ -228,6 +247,14 @@ struct SessionView: View {
 
         var shown: CGSize {
             CGSize(width: min(touch.width / max(screen.width, 1), 1), height: min(touch.height / max(screen.height, 1), 1))
+        }
+
+        /// The space the Mac's screen could fill, whatever its shape: on its side, not zoomed in and not typing.
+        /// Elsewhere nil, and the Mac keeps the shape it has (upright, it sits small above the trackpad).
+        static func space(full: CGSize, insets: EdgeInsets, landscape: Bool, zoomed: Bool, typing: Bool) -> CGSize? {
+            guard landscape, !zoomed, !typing else { return nil }
+            let side = Device.isPad && full.height >= 600 ? 2 * max(insets.leading, insets.trailing) : 0
+            return CGSize(width: full.width - side, height: full.height)
         }
 
         init(full: CGSize, insets: EdgeInsets, landscape: Bool, zoomed: Bool, typing: Bool, centre: CGPoint, aspect: CGFloat) {
@@ -409,7 +436,7 @@ struct SessionView: View {
 
     /// The whole screen, small, with where the zoomed view is on it.
     private func zoomMap(_ layout: Layout) -> some View {
-        let width: CGFloat = 112, height = width / mac.aspect
+        let width: CGFloat = 112, height = width / aspect
         let viewW = min(layout.touch.width / layout.screen.width, 1) * width
         let viewH = min(layout.touch.height / layout.screen.height, 1) * height
         let left = (-layout.screen.minX / layout.screen.width) * width
@@ -435,9 +462,9 @@ struct SessionView: View {
         while !Task.isCancelled {
             var x: Int32 = 0, y: Int32 = 0
             if henge_vm_pointer(&x, &y) == 0 {
-                moveZoom(toward: CGPoint(x: CGFloat(x) / CGFloat(mac.screen.width), y: CGFloat(y) / CGFloat(mac.screen.height)))
+                moveZoom(toward: CGPoint(x: CGFloat(x) / CGFloat(macScreen.width), y: CGFloat(y) / CGFloat(macScreen.height)))
             }
-            if tick % 60 == 0, let image = MacPreview.capture(width: 224, height: Int(224 / mac.aspect)) { map = UIImage(cgImage: image) }
+            if tick % 60 == 0, let image = MacPreview.capture(width: 224, height: Int(224 / aspect)) { map = UIImage(cgImage: image) }
             tick += 1
             try? await Task.sleep(nanoseconds: 33_000_000)
         }
@@ -605,6 +632,9 @@ struct SessionView: View {
             henge_vm_set_display_mm(0, 0)
         }
         HengeLog.log("session", "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)")
+        // Fit and Retina follow the space the Mac is shown in; a size picked for speed or 16:9 stays as picked.
+        HengeLog.log("display", "corner radius \(Device.displayCornerRadius) pt")
+        display.begin(screen: mac.screen, follows: mac.isRetina || mac.screen == Device.fittingScreen, retina: mac.isRetina)
         var rc: Int32 = -1
         if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
             HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(at))) s ago")
@@ -628,6 +658,7 @@ struct SessionView: View {
         }
         bootRAM = ram
         started = Date()
+        display.setRunning(true)
         var used = mac
         used.lastUsed = started
         Machines.shared.update(used)
@@ -657,6 +688,7 @@ struct SessionView: View {
                 HengeLog.log("session", "thermal state: \(Self.thermalLabel(heat))")
             }
             if state == 2 {
+                display.setRunning(false)
                 typing = false
                 showDetails = false
                 confirmStop = false
@@ -671,6 +703,7 @@ struct SessionView: View {
                 }
                 break
             }
+            display.sync()
             tick += 1
             if tick % 10 == 0 {
                 let gpuFrames = henge_vm_gpu_frames()
