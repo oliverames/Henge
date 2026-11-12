@@ -216,6 +216,7 @@ final class HardwareMouse {
     private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
     private var lastScrollFirst: Float = 0, lastScrollSecond: Float = 0
     private var lastRoute: Bool?
+    private var movesLogged = 0
 
     func start() {
         if started { stop() } // again after a boot: fresh settings, and one set of observers
@@ -233,6 +234,7 @@ final class HardwareMouse {
             self.restX = 0; self.restY = 0; self.restWheel = 0; self.restPan = 0
             self.lastScrollFirst = 0; self.lastScrollSecond = 0
             self.lastRoute = nil
+            self.movesLogged = 0
         }
         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
         GCMouse.mice().forEach(attach)
@@ -300,6 +302,13 @@ final class HardwareMouse {
             extra.pressedChangedHandler = { [weak self] _, _, pressed in self?.sideButton(UInt32(3 + i), pressed) }
         }
         input.scroll.valueChangedHandler = { [weak self] _, first, second in self?.scrolled(first, second) }
+        // Whether GameController delivers anything for this mouse: an iPhone announces a mouse it may never pass on.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak mouse] in
+            guard let self, let mouse else { return }
+            let scenes = UIApplication.shared.connectedScenes.map { "\($0.session.role.rawValue):\($0.activationState.rawValue)" }
+            let moves = self.queue.sync { self.movesLogged }
+            HengeLog.log("input", "mouse 5 s on: current \(GCMouse.current === mouse), moves seen \(moves), left now \(mouse.mouseInput?.leftButton.isPressed ?? false), scenes \(scenes)")
+        }
     }
 
     /// Whether this event goes to the USB mouse. Logged when it changes, so a device log shows the handover.
@@ -314,6 +323,8 @@ final class HardwareMouse {
 
     /// GameController's Y runs upward. What doesn't make a whole step yet waits for the next move.
     private func moved(_ dx: Float, _ dy: Float) {
+        if movesLogged < 8 || movesLogged % 500 == 0 { HengeLog.log("input", "mouse moved \(dx), \(dy) (#\(movesLogged + 1))") }
+        movesLogged += 1
         restX += dx * speed
         restY -= dy * speed
         let x = restX.rounded(), y = restY.rounded()
