@@ -3219,6 +3219,27 @@ int hv_pvg_metal_snapshot(HvPvgMetal *m, uint8_t *bgra, uint32_t w, uint32_t h) 
     return 0;
 }
 
+/* The pointer as the device's screen shows it, for tests: its glyph (premultiplied BGRA, copied into glyph when it
+   fits), the hot spot, the scale Henge draws it at, and whether it is drawn now. -1 before the guest sent one. */
+int hv_pvg_metal_cursor(HvPvgMetal *m, uint8_t *glyph, size_t cap, HvPvgCursor *out) {
+    if (!m || !out) return -1;
+    HvReplay *r = (__bridge HvReplay *)m;
+    const uint8_t *page = hv_pvg_lite_display_page(r->lite);
+    os_unfair_lock_lock(&r->screen_lock);
+    int rc = -1;
+    if (r->cursor && r->cursor_w && r->cursor_h) {
+        out->width = r->cursor_w, out->height = r->cursor_h, out->hot_x = r->cursor_hot_x, out->hot_y = r->cursor_hot_y;
+        out->scale = cursor_scale(page, r->screen_w ? r->screen_w : r->frame_w);
+        out->shown = r->cursor_shown || (page && page[0xe04]);
+        size_t need = (size_t)r->cursor_w * r->cursor_h * 4;
+        if (glyph && cap >= need)
+            for (uint32_t y = 0; y < r->cursor_h; y++) memcpy(glyph + (size_t)y * r->cursor_w * 4, r->cursor + (size_t)y * r->cursor_stride, (size_t)r->cursor_w * 4);
+        rc = 0;
+    }
+    os_unfair_lock_unlock(&r->screen_lock);
+    return rc;
+}
+
 int hv_pvg_metal_frame(HvPvgMetal *m, const uint8_t **pixels, uint32_t *w, uint32_t *h) {
     if (!m) return -1;
     HvReplay *r = (__bridge HvReplay *)m;

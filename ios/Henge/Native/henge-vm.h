@@ -111,6 +111,9 @@ void henge_vm_touch_button(int down); /* the pad's full press (a click) */
 int henge_vm_pointer(int *x, int *y);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int henge_vm_snapshot(uint8_t *bgra, int width, int height);
+/* The pointer's glyph (premultiplied BGRA, width x height, copied when cap is big enough), its hot spot, the scale
+   the device draws it at and whether it is drawn now; -1 before macOS sent one. For tests. */
+int henge_vm_cursor(uint8_t *glyph, size_t cap, uint32_t *width, uint32_t *height, int *hot_x, int *hot_y, int *scale, int *shown);
 
 /* The boot framebuffer (Apple logo and progress bar), 32-bit BGRA, or -1 if
    the kernel has not got that far. A successful call returns an owned copy;
