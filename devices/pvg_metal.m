@@ -17,11 +17,17 @@
 #include <string.h>
 #include <sys/utsname.h>
 
-/* 1080p shrunk onto a phone would make a normal pointer a few dots across; an iPad's screen needs less. */
-static int cursor_scale(void) {
+/* The pointer is drawn bigger than the guest's glyph only where macOS draws it too small for the screen it is on:
+   a 1x Mac (1080p and the like) shrunk onto a phone makes it a few dots across, and an iPad's screen needs less.
+   A Mac told its panel is Retina-dense draws at 2x and sends a 2x glyph sized for that panel, so it is shown as
+   sent, the same size macOS draws it into the frame itself. The page's width in mm (+0x14) is what macOS was told,
+   for this mode. Settings: 1-3 fixed, anything else automatic. */
+static int cursor_scale(const uint8_t *page, uint32_t width) {
 #if TARGET_OS_IPHONE
     NSInteger saved = [[NSUserDefaults standardUserDefaults] integerForKey:@"henge.cursor.scale"];
     if (saved >= 1 && saved <= 3) return (int)saved;
+    uint32_t width_mm = page ? *(const uint16_t *)(page + 0x14) : 0;
+    if (width_mm && width * 25.4f / width_mm >= 150) return 1;
     static int defaultScale;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -31,6 +37,7 @@ static int cursor_scale(void) {
     });
     return defaultScale;
 #else
+    (void)page, (void)width;
     return 1;
 #endif
 }
@@ -2323,7 +2330,7 @@ static const uint8_t *half_to_byte(void) {
     }
     if (where == 0xffffffff) return;
     /* Bigger than the guest draws it. The hot spot stays where it points. */
-    const int scale = cursor_scale();
+    const int scale = cursor_scale(page, w);
     int x = (int)(where & 0xffff) - cursor_hot_x * scale, y = (int)(where >> 16) - cursor_hot_y * scale;
     int cw = (int)cursor_w * scale, ch = (int)cursor_h * scale;
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
@@ -2568,7 +2575,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         const uint8_t *page = hv_pvg_lite_display_page(lite);
         uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
         if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
-            const float scale = cursor_scale();
+            const float scale = cursor_scale(page, W);
             float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
             float cw = cw0 * scale, ch = ch0 * scale;
             float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
