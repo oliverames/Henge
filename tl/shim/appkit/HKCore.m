@@ -535,7 +535,10 @@ static NSRect rect_of(NSPoint a, NSPoint b) {
 - (void)updateTrackingAreas {}
 
 - (NSTextInputContext *)inputContext {
-    if (!_inputContext && [self conformsToProtocol:NSProtocolFromString(@"NSTextInputClient")]) {
+    /* A text input client by protocol, or by its methods (a Rust (objc2) view declares the protocol by name, which
+       need not resolve without AppKit's runtime protocol object). */
+    if (!_inputContext && ([self conformsToProtocol:NSProtocolFromString(@"NSTextInputClient")] ||
+                           [self respondsToSelector:NSSelectorFromString(@"insertText:replacementRange:")])) {
         Class c = [NSTextInputContext class];
         _inputContext = ((id(*)(id, SEL, id))objc_msgSend)([c alloc], @selector(initWithClient:), self);
     }
@@ -800,10 +803,40 @@ static SEL delegate_selector(NSString *note, NSString *prefix) {
 }
 
 /* ---- ordering ---- */
+/* AppKit's stacking: windows of a higher level above those of a lower one, and a child window just above its parent
+   (Chromium's bubbles, such as "Restore pages?", are child windows: they stayed behind the browser window when it
+   came to the front). Order is otherwise kept. */
+static NSWindow *top_parent(NSWindow *w) {
+    for (int n = 0; w.parentWindow && n < 16; n++) w = w.parentWindow;
+    return w;
+}
+static void add_family(NSMutableArray *out, NSWindow *w, NSArray *order, int depth) {
+    [out addObject:w];
+    if (depth > 16) return;
+    for (NSWindow *c in order)
+        if (c.parentWindow == w && ![out containsObject:c]) add_family(out, c, order, depth + 1);
+}
+static void restack(void) {
+    NSArray *order = [g_windows copy];
+    NSMutableArray *tops = [NSMutableArray array];
+    for (NSWindow *w in order) {
+        NSWindow *t = top_parent(w);
+        if (![tops containsObject:t]) [tops addObject:t];
+    }
+    NSArray *byLevel = [tops sortedArrayWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSWindow *a, NSWindow *b) {
+        return a.level < b.level ? NSOrderedAscending : a.level > b.level ? NSOrderedDescending : NSOrderedSame;
+    }];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSWindow *t in byLevel) add_family(out, t, order, 0);
+    for (NSWindow *w in order) /* any left out (a parent cycle) keep their place at the end */
+        if (![out containsObject:w]) [out addObject:w];
+    [g_windows setArray:out];
+}
 - (void)hk_show {
     BOOL was = _visible;
     [g_windows removeObjectIdenticalTo:self];
     [g_windows addObject:self];
+    restack();
     _visible = YES;
     tell_presenter(self, 1);
     if (!was) [self hk_post:@"NSWindowDidChangeOcclusionStateNotification"];
@@ -1258,7 +1291,7 @@ static NSArray<NSString *> *app_notifications(void) {
     pthread_mutex_t _qlock;
     CFRunLoopSourceRef _wake;
     CFRunLoopRef _loop;
-    BOOL _running, _active, _launched, _stopRequested;
+    BOOL _running, _active, _launched, _stopRequested, _terminating;
     NSEvent *_current;
     NSApplicationActivationPolicy _policy;
 }
@@ -1294,6 +1327,10 @@ static void wake_perform(void *info) {}
         CFRunLoopAddSource(_loop, _wake, kCFRunLoopCommonModes);
         CFRunLoopAddSource(_loop, _wake, (__bridge CFStringRef) @"NSEventTrackingRunLoopMode");
         CFRunLoopAddSource(_loop, _wake, (__bridge CFStringRef) @"NSModalPanelRunLoopMode");
+        /* As AppKit does: the common modes include its tracking and modal modes, so what an app (Chromium's message
+           pump) and Core Animation's commits put in the common modes also run while a menu is tracked. */
+        CFRunLoopAddCommonMode(_loop, (__bridge CFStringRef) @"NSEventTrackingRunLoopMode");
+        CFRunLoopAddCommonMode(_loop, (__bridge CFStringRef) @"NSModalPanelRunLoopMode");
     }
     return self;
 }
@@ -1382,9 +1419,11 @@ static void wake_perform(void *info) {}
 }
 
 - (void)run {
-    [self finishLaunching];
+    /* A stop: during finishLaunching (GLFW's delegate stops the run it started from applicationDidFinishLaunching:)
+       ends this run, as in AppKit: the request is cleared before launching, not after. */
     _running = YES;
     _stopRequested = NO;
+    [self finishLaunching];
     while (_running && !_stopRequested) {
         @autoreleasepool {
             NSEvent *e = [self nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantFuture] inMode:NSDefaultRunLoopMode dequeue:YES];
@@ -1392,6 +1431,9 @@ static void wake_perform(void *info) {}
         }
     }
     _running = NO;
+    /* The stop ended this run only: an app that goes on taking events itself (GLFW, SDL poll after their launch
+       run) gets them, and the run loop runs, unless the app is quitting. */
+    if (!_terminating) _stopRequested = NO;
 }
 
 - (void)stop:(id)sender {
@@ -1413,6 +1455,7 @@ static void wake_perform(void *info) {}
 }
 
 - (void)hk_finishTerminate {
+    _terminating = YES;
     [self hk_post:@"NSApplicationWillTerminateNotification"];
     for (NSWindow *w in [g_windows copy]) [w orderOut:nil];
     hk_log("the application terminated");

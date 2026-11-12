@@ -365,9 +365,10 @@ enum HengeLog {
         log("boot", "build       : \(version) (\(build)) \(commit) built \(built)")
         log("boot", "pid         : \(getpid())")
         log("boot", "log file    : \(logFileURL.path)")
-        // Every iOS 27 device except iPad8,11/8,12 enforces TXM, which is what makes
-        // the debugger-assisted JIT path mandatory rather than optional.
-        log("boot", "TXM expected: \(Self.expectsTXM(model: model) ? "YES" : "no")")
+        // TXM is what makes the debugger-assisted JIT path mandatory rather than optional. The device tree says whether
+        // this device runs it; the model table is the fallback, and the two are logged together so a wrong entry shows.
+        let detected = TXMDetection.fromDeviceTree.map { $0 ? "YES" : "no" } ?? "unknown (device tree not readable)"
+        log("boot", "TXM         : \(detected); model table expects \(Self.expectsTXM(model: model) ? "YES" : "no")")
         log("boot", "===============================================")
     }
 

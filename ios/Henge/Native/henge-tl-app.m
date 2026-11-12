@@ -2,6 +2,7 @@
    against Henge's AppKit (tl/shim/appkit), its windows shown by MacScreenView (Swift) through the calls below. */
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/message.h>
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -118,6 +119,10 @@ static NSArray<NSString *> *arguments_for(NSString *app, NSString *exe) {
                 @"WebUIToolbar,WebUIReloadButton,WebUIBackForwardButton,WebUIHomeButton,WebUISplitTabsButton,"
                 @"InitialWebUI,InitialWebUIWithoutExtensions",
             ]];
+        else if (electron)
+            /* Electron as one process (HENGE_TL_ELECTRON_SINGLE): its Node.js has already enabled V8's WebAssembly
+               trap handler in this process, and the renderer's second enabling would be fatal. */
+            [args addObjectsFromArray:@[@"--single-process", @"--disable-features=RemoteCoreAnimationAPI,WebAssemblyTrapHandler"]];
         else
             [args addObjectsFromArray:@[@"--single-process", @"--disable-features=RemoteCoreAnimationAPI"]];
         [args addObjectsFromArray:@[
@@ -340,4 +345,57 @@ void henge_tl_app_key(int down, unsigned short keycode, const char *chars, unsig
     if (!w) return;
     NSString *c = chars ? @(chars) : @"";
     hk_post_key(w, down ? NSEventTypeKeyDown : NSEventTypeKeyUp, keycode, c, c, flags);
+}
+
+/* ---- the menu bar's menus, for MacScreenView's menu button ---- */
+
+static NSArray *menu_items(NSMenu *menu, NSArray<NSNumber *> *path, int depth) {
+    if (depth) [menu hk_prepare]; /* menuNeedsUpdate: (menus filled as they open) and the items' enabling */
+    NSMutableArray *out = [NSMutableArray array];
+    NSArray<NSMenuItem *> *items = menu.itemArray;
+    for (NSUInteger i = 0; i < items.count; i++) {
+        NSMenuItem *it = items[i];
+        if (it.isHidden || ([it respondsToSelector:NSSelectorFromString(@"isAlternate")] && ((BOOL (*)(id, SEL))objc_msgSend)(it, NSSelectorFromString(@"isAlternate")))) continue;
+        NSArray *here = [path arrayByAddingObject:@(i)];
+        if (it.isSeparatorItem) {
+            [out addObject:@{@"separator" : @YES, @"path" : here}];
+            continue;
+        }
+        NSString *title = it.title ?: @"";
+        if (!depth && i == 0 && it.submenu) /* the application menu: titled with the app's name */
+            title = [[g_app lastPathComponent] stringByDeletingPathExtension] ?: title;
+        if (!title.length) continue;
+        NSMutableDictionary *d = [@{@"title" : title, @"enabled" : @(it.isEnabled || (!depth && it.submenu)), @"state" : @(it.state),
+                                    @"path" : here} mutableCopy];
+        if (it.submenu && depth < 4) d[@"children"] = menu_items(it.submenu, here, depth + 1);
+        [out addObject:d];
+    }
+    return out;
+}
+
+const void *henge_tl_app_main_menu(void) {
+    NSMenu *bar = NSApp.mainMenu;
+    if (!bar.numberOfItems) return NULL;
+    @autoreleasepool {
+        return (__bridge_retained const void *)menu_items(bar, @[], 0);
+    }
+}
+
+void henge_tl_app_menu_choose(const int *path, int depth) {
+    NSMenu *menu = NSApp.mainMenu;
+    for (int d = 0; menu && d < depth; d++) {
+        NSMenuItem *it = [menu itemAtIndex:path[d]];
+        if (!it) return;
+        if (d == depth - 1) {
+            if (getenv("HK_LOG_EVENTS")) fprintf(stderr, "henge: tl: menu bar item \"%s\" chosen\n", it.title.UTF8String);
+            if (!it.isEnabled) return;
+            /* sent from the app's run loop, as a menu's action is, not from inside iOS's menu callback */
+            NSMenu *m = menu;
+            NSInteger at = path[d];
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{ [m performActionForItemAtIndex:at]; });
+            CFRunLoopWakeUp(CFRunLoopGetMain());
+            return;
+        }
+        menu = it.submenu;
+    }
 }

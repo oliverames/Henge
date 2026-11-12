@@ -917,6 +917,17 @@ static HKGLContext *ctx_of(NSOpenGLContext *ctx) { return ctx ? ctx->_c : NULL; 
 }
 @end
 
+/* AppKit gives every view wantsBestResolutionOpenGLSurface (GLFW sets it on its own content view, not an
+   NSOpenGLView): kept, so a context drawing into the view sizes its surface in pixels, as the app's framebuffer size
+   (the view's backing size) expects. NSOpenGLView keeps its own below. */
+static char g_best_key;
+@implementation NSView (HKOpenGLResolution)
+- (BOOL)wantsBestResolutionOpenGLSurface { return [objc_getAssociatedObject(self, &g_best_key) boolValue]; }
+- (void)setWantsBestResolutionOpenGLSurface:(BOOL)flag {
+    objc_setAssociatedObject(self, &g_best_key, flag ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+@end
+
 @implementation NSOpenGLView {
     NSOpenGLContext *_glContext;
     NSOpenGLPixelFormat *_glFormat;

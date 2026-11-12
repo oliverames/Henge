@@ -778,7 +778,7 @@ static void fill_rounded(NSRect r, CGFloat radius, NSColor *fill, NSColor *strok
 - (void)attachPopUpWithFrame:(NSRect)frame inView:(NSView *)view {}
 - (void)dismissPopUp {}
 - (void)performClickWithFrame:(NSRect)frame inView:(NSView *)view {
-    hk_log("NSPopUpButtonCell: menu not shown (%ld items)", (long)_menu.numberOfItems);
+    hk_menu_cell_click(self, frame, view); /* HKMenu.m */
 }
 @end
 

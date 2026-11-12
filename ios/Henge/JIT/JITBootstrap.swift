@@ -230,9 +230,9 @@ enum JITBootstrap {
     }
 
     /// Whether this device enforces TXM, so that only a trap servicer can grant
-    /// executable memory. Uses the same rule as the "TXM expected" line in the
-    /// log banner, so the two can never disagree.
-    static let deviceEnforcesTXM: Bool = HengeLog.expectsTXM(model: HengeLog.deviceModel)
+    /// executable memory. Read from the device tree (TXMDetection); the model
+    /// table answers only when that cannot be read. The log banner's TXM line shows both.
+    static let deviceEnforcesTXM: Bool = TXMDetection.fromDeviceTree ?? HengeLog.expectsTXM(model: HengeLog.deviceModel)
 
     /// Why the last prewarm failed, for the UI to show.
     ///

@@ -339,6 +339,7 @@ final class JITCoordinator: ObservableObject {
                     }
                     busy = false
                     txmPresent = response.txmPresent
+                    noteTXMAnswer(response.txmPresent)
                     prepared = response.success
                     status = response.success ? response.message : nil
                     error = response.success ? nil : helperFailure(response.message)
@@ -419,6 +420,14 @@ final class JITCoordinator: ObservableObject {
                     }
                 })
         }
+    }
+
+    /// StikJIT reads TXM its own way. Log it when it disagrees with Henge's answer, so a wrong one shows in the log.
+    private func noteTXMAnswer(_ stikJIT: Bool?) {
+        guard let stikJIT, stikJIT != JITBootstrap.deviceEnforcesTXM else { return }
+        log("TXM: StikJIT says \(stikJIT ? "present" : "absent"), Henge assumed "
+            + "\(JITBootstrap.deviceEnforcesTXM ? "present" : "absent") (device tree: "
+            + "\(TXMDetection.fromDeviceTree.map { $0 ? "present" : "absent" } ?? "unreadable"))")
     }
 
     func resetDDI() {

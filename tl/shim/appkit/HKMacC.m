@@ -95,6 +95,9 @@ static CFDictionaryRef us_keyboard(void) {
         @"TISPropertyInputSourceIsEnabled" : @YES,
         @"TISPropertyInputSourceIsSelected" : @YES,
         @"TISPropertyInputSourceLanguages" : @[ @"en" ],
+        /* a placeholder for the layout's 'uchr' data (UCKeyTranslate below knows the US layout without it); GLFW
+           refuses to start without some */
+        (__bridge NSString *)hk_kTISPropertyUnicodeKeyLayoutData : [NSData dataWithBytes:"uchr-us\0" length:8],
     };
     return CFBridgingRetain(d);
 }
@@ -107,16 +110,27 @@ HK_FN(CFArrayRef, TISCreateASCIICapableInputSourceList, (void)) {
     CFRelease(s);
     return a;
 }
-/* No 'uchr' layout data is available, so kTISPropertyUnicodeKeyLayoutData answers NULL. */
 HK_FN(void *, TISGetInputSourceProperty, (CFTypeRef source, CFStringRef key)) {
     if (!source || !key || CFGetTypeID(source) != CFDictionaryGetTypeID()) return NULL;
     return (void *)CFDictionaryGetValue((CFDictionaryRef)source, key);
 }
+/* The US layout's characters by Mac key code (ANSI positions), plain and with Shift. */
+static const char kUSPlain[52] = "asdfhgzxcv\0bqweryt123465=97-80]ou[ip\0lj'k;\\,/nm.\t `";
+static const char kUSShift[52] = "ASDFHGZXCV\0BQWERYT!@#$^%+(&_*)}OU{IP\0LJ\"K:|<?NM>\t ~";
 HK_FN(OSStatus, UCKeyTranslate, (const void *layout, uint16_t keyCode, uint16_t action, uint32_t modifiers, uint32_t keyboardType,
                                  uint32_t options, uint32_t *deadKeyState, unsigned long maxLength, unsigned long *actualLength,
                                  UniChar *chars)) {
-    if (actualLength) *actualLength = 0;
-    return -1;
+    /* modifiers: EventModifiers >> 8, where shift is 0x02 and caps lock 0x04 */
+    if (deadKeyState) *deadKeyState = 0;
+    unichar c = 0;
+    if (keyCode < 51) c = (unsigned char)((modifiers & 0x02) ? kUSShift : kUSPlain)[keyCode];
+    if (c && (modifiers & 0x04) && c >= 'a' && c <= 'z') c -= 32;
+    if (keyCode == 36) c = '\r';
+    if (keyCode == 51) c = 8;
+    if (keyCode == 53) c = 27;
+    if (actualLength) *actualLength = c && maxLength ? 1 : 0;
+    if (c && maxLength && chars) chars[0] = c;
+    return 0;
 }
 
 /* ================================================================ processes */
