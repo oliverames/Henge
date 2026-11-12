@@ -31,7 +31,7 @@ struct MacOSRelease: Identifiable, Hashable {
                      bytes: 18_856 << 20, note: "Installs and runs on iPhone. Its first setup is slow: creating the account can take 10 minutes."),
         MacOSRelease(id: "26B123", name: "macOS 27.2",
                      url: URL(string: "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw")!,
-                     bytes: 24_409 << 20, note: "The newest. Installs and runs on iPhone, but it's the slowest here, and Safari's pages may stay blank."),
+                     bytes: 24_409 << 20, note: "The newest. Installs and runs on iPhone, but it's the slowest here."),
     ]
 
     /// Selected in the Install tab when nothing is downloaded yet: the one Henge is tested with most.
