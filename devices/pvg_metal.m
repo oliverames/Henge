@@ -232,13 +232,16 @@ static NSUInteger pixel_bytes(MTLPixelFormat f) {
     }
 }
 
-/* Metal aborts the app, rather than failing, on a linear texture whose rows don't hold its width or don't fit the buffer.
-   A view the guest makes in another format, or a surface read with the wrong description, can ask for one. */
+/* Metal aborts the app, rather than failing, on a linear texture whose rows don't hold its width or whose row or offset
+   isn't aligned. A view the guest makes in another format, or a surface read with the wrong description, can ask for one.
+   The last row needs only the texture's width: Metal's own length check (debug layer, "Length required by texture
+   offset, bytes per row, height ...") is offset + row * (height - 1) + width * bytes per pixel. Asking for whole rows
+   left a macOS icon (72x72 on rows of 1440, ending 208 bytes short of its buffer's last row) empty. */
 static BOOL linear_texture_fits(id<MTLDevice> device, MTLTextureDescriptor *t, uint64_t offset, uint64_t row, NSUInteger length) {
     NSUInteger bpp = pixel_bytes(t.pixelFormat);
     if (!bpp) return YES; /* not checked: as before */
     NSUInteger align = [device minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat];
-    BOOL ok = row >= t.width * bpp && (!align || (row % align == 0 && offset % align == 0)) && offset + row * t.height <= length;
+    BOOL ok = row >= t.width * bpp && (!align || (row % align == 0 && offset % align == 0)) && t.height && offset + row * (t.height - 1) + t.width * bpp <= length;
     if (!ok) {
         static int told;
         if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: a %lux%lu format %lu texture can't sit on rows of %llu bytes at %llu in %lu: left empty\n",
