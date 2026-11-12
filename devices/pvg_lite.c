@@ -8,7 +8,8 @@
      +1020 channel doorbell (the value is the channel)
      +1018 stamps-updated bits (1 << channel), +1014 display bits, +102c faults
      +1034 protocol version (the driver offers one, the device answers),
-     +122c number of displays
+     +122c number of displays, +1234 each port's connection type (2 bits per
+       port; 0 reads as external, so macOS gives the panel no corner artwork)
 
    FIFO buffer: a control area where stamp[channel] is at +4 * channel, then
    the root ring. Root page: channel records at 0x400 + 0x14 * (channel - 1)
@@ -235,6 +236,13 @@ static void display_announce(HvPvgLite *p, uint8_t *d, uint32_t events) {
     __atomic_store_n((uint32_t *)(d + 0xfc0), 1, __ATOMIC_RELEASE);
 }
 
+/* The Mac's panel is built in (macOS draws its rounded corners) unless HV_PVG_EXTERNAL=1. */
+static int pvg_external(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("HV_PVG_EXTERNAL") && atoi(getenv("HV_PVG_EXTERNAL"));
+    return v;
+}
+
 static void display_set_page(HvPvgLite *p, uint64_t pa) {
     uint8_t *d = hv_phys_ptr(p->m, pa, 0x4000);
     if (!d) return;
@@ -245,6 +253,9 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
     PUT32(0x18, 0x01000100);
     PUT32(0x1c, 0x400);
     PUT32(0x20, 3);
+    /* +60 flags: 0 or 2 makes the driver mark the display external (no rounded-corner artwork); any other bit makes it
+       the primary built-in panel. HV_PVG_EXTERNAL=1 keeps it external. */
+    PUT32(0x60, pvg_external() ? 0 : 1);
     p->display_gen = atomic_load(&display_gen);
     uint64_t size = atomic_load(&display_size);
     p->display_mode = size, p->display_ppmm = atomic_load(&display_ppmm);
@@ -839,6 +850,7 @@ static uint64_t gfx_read(void *opaque, uint64_t off, unsigned size) {
         v = __atomic_exchange_n(&p->status, 0, __ATOMIC_ACQ_REL);
         break;
     case 0x122c: v = 1; break;
+    case 0x1234: v = pvg_external() ? 0 : 1; break; /* port 0 built in, not external */
     case 0x1014: /* displays with an event, cleared by the read */
         v = __atomic_exchange_n(&p->display_bits, 0, __ATOMIC_ACQ_REL);
         if (v && p->display_reads_logged++ < 4) fprintf(stderr, "hengevm: pvg-lite: guest reads +1014 = %llx\n", (unsigned long long)v);
