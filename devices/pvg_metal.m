@@ -232,16 +232,16 @@ static NSUInteger pixel_bytes(MTLPixelFormat f) {
     }
 }
 
-/* Metal aborts the app, rather than failing, on a linear texture whose rows don't hold its width, whose offset or rows aren't aligned
-   (release Metal asserts this too), or (debug layer) that doesn't fit the buffer. A view the guest makes in another format, or a
-   surface read with the wrong description, can ask for one. The fit Metal requires ends at the last row's last pixel, not a whole
-   last row: offset + row * (height - 1) + width * bpp (measured on an M2 Pro, macOS 27.3; the debug layer's assertion names that
-   length). Asking for a whole last row refused a 72x72 icon on the Duo whose buffer ended 1152 bytes before that. */
+/* Metal aborts the app, rather than failing, on a linear texture whose rows don't hold its width or whose row or offset
+   isn't aligned. A view the guest makes in another format, or a surface read with the wrong description, can ask for one.
+   The last row needs only the texture's width: Metal's own length check (debug layer, "Length required by texture
+   offset, bytes per row, height ...") is offset + row * (height - 1) + width * bytes per pixel. Asking for whole rows
+   left a macOS icon empty (72x72 on rows of 1440: a whole last row would run 944 bytes past its buffer). */
 static BOOL linear_texture_fits(id<MTLDevice> device, MTLTextureDescriptor *t, uint64_t offset, uint64_t row, NSUInteger length) {
     NSUInteger bpp = pixel_bytes(t.pixelFormat);
     if (!bpp) return YES; /* not checked: as before */
     NSUInteger align = [device minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat];
-    BOOL ok = row >= t.width * bpp && (!align || (row % align == 0 && offset % align == 0)) && (!t.height || offset + row * (t.height - 1) + t.width * bpp <= length);
+    BOOL ok = row >= t.width * bpp && (!align || (row % align == 0 && offset % align == 0)) && t.height && offset + row * (t.height - 1) + t.width * bpp <= length;
     if (!ok) {
         static int told;
         if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: a %lux%lu format %lu texture can't sit on rows of %llu bytes at %llu in %lu: left empty\n",
