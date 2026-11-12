@@ -115,5 +115,8 @@ int hv_vm_pointer(int *x, int *y);
 int hv_vm_display_size(uint32_t *width, uint32_t *height);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int hv_vm_snapshot(uint8_t *bgra, int width, int height);
+/* The pointer's glyph and how the device draws it (devices/pvg_lite.h), for tests. */
+struct HvPvgCursor;
+int hv_vm_cursor(uint8_t *glyph, size_t cap, struct HvPvgCursor *out);
 
 #endif

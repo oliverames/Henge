@@ -440,6 +440,14 @@ int henge_vm_pointer(int *x, int *y) {
     pthread_rwlock_unlock(&api_lock);
     return result;
 }
+int henge_vm_cursor(uint8_t *glyph, size_t cap, uint32_t *width, uint32_t *height, int *hot_x, int *hot_y, int *scale, int *shown) {
+    if (!lock_running()) return -1;
+    HvPvgCursor c;
+    int result = hv_vm_cursor(glyph, cap, &c);
+    pthread_rwlock_unlock(&api_lock);
+    if (result == 0) *width = c.width, *height = c.height, *hot_x = c.hot_x, *hot_y = c.hot_y, *scale = c.scale, *shown = c.shown;
+    return result;
+}
 int henge_vm_snapshot(uint8_t *bgra, int width, int height) {
     if (!lock_running()) return -1;
     int result = hv_vm_snapshot(bgra, width, height);
