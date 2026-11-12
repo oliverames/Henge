@@ -58,15 +58,34 @@ enum Device {
         return (1600, Int((Double(fit.height) * 5 / 6 / 8).rounded()) * 8)
     }
 
-    /// The panel itself, on its side: every physical pixel, and its real size in mm so that macOS
-    /// sees a Retina density and draws at 2x (looks like half the pixels, sharp as the iPad's own UI).
-    /// Every iPad with an M chip is 264 ppi.
-    static var retinaScreen: (width: Int, height: Int) {
-        let n = UIScreen.main.nativeBounds.size
-        return (Int(max(n.width, n.height)) / 8 * 8, Int(min(n.width, n.height)) / 8 * 8)
+    /// The screen Henge is on. An iPhone Duo has two, and UIScreen.main can be the one Henge is not on.
+    static var screen: UIScreen {
+        if !isPad {
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                .filter { $0.session.role == .windowApplication }
+            if let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first {
+                return scene.screen
+            }
+        }
+        return UIScreen.main
     }
-    static var retinaMM: (width: Int, height: Int) {
-        let s = retinaScreen
+
+    /// Where a Retina Mac can be offered: every iPad, and an iPhone's large screen (iPhone Duo unfolded).
+    static var offersRetina: Bool { isPad || largeScreen }
+
+    /// The panel itself, on its side: every physical pixel, and a size in mm at 264 ppi so that macOS
+    /// sees a Retina density and draws at 2x (looks like half the pixels, sharp as iOS's own UI).
+    /// Every iPad with an M chip is 264 ppi. An iPhone Duo's inner screen gets the same density, so macOS
+    /// picks 2x there too; on that screen the panel is 2853 × 2007, and a Mac that leaves the side strip
+    /// gets the panel less the strip.
+    static func retinaScreen(fill: Bool = true) -> (width: Int, height: Int) {
+        let n = screen.nativeBounds.size
+        var long = max(n.width, n.height), short = min(n.width, n.height)
+        if !isPad, largeScreen, !fill { long -= sideStrip * screen.nativeScale }
+        return (Int(long) / 8 * 8, Int(short) / 8 * 8)
+    }
+    static func retinaMM(fill: Bool = true) -> (width: Int, height: Int) {
+        let s = retinaScreen(fill: fill)
         return (Int((Double(s.width) / 264 * 25.4).rounded()), Int((Double(s.height) / 264 * 25.4).rounded()))
     }
 

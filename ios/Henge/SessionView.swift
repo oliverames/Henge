@@ -646,7 +646,8 @@ struct SessionView: View {
         EngineTuning.apply()
         henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
         if mac.isRetina {
-            henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
+            let mm = Device.retinaMM(fill: mac.fillScreen ?? true)
+            henge_vm_set_display_mm(UInt32(mm.width), UInt32(mm.height))
         } else {
             henge_vm_set_display_mm(0, 0)
         }

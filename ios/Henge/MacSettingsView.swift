@@ -71,10 +71,8 @@ struct MacSettingsView: View {
                             }
                             save()
                         })) {
-                            if Device.isPad {
-                                Text("Retina").tag("retina")
-                                Text("Performance").tag("performance")
-                            }
+                            if Device.offersRetina { Text("Retina").tag("retina") }
+                            if Device.isPad { Text("Performance").tag("performance") }
                             Text("Fit this \(Device.name)").tag("fit")
                             Text("16:9").tag("wide")
                         }

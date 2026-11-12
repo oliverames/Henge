@@ -21,8 +21,13 @@ struct VirtualMac: Identifiable, Codable, Hashable {
     /// On an iPhone's large screen (iPhone Duo unfolded): fill it, or leave a strip at the right for the status
     /// bar and Henge's controls. Macs that never chose fill it.
     var fillScreen: Bool?
-    var isRetina: Bool { Device.isPad && (retina ?? false) }
-    var screen: (width: Int, height: Int) { isRetina ? Device.retinaScreen : (screenWidth ?? 1920, screenHeight ?? 1080) }
+    /// On an iPhone's large screen a Mac that never chose is Retina: fitted pixels at 1x come out about half size.
+    var isRetina: Bool {
+        Device.isPad ? (retina ?? false) : Device.largeScreen && (retina ?? true)
+    }
+    var screen: (width: Int, height: Int) {
+        isRetina ? Device.retinaScreen(fill: fillScreen ?? true) : (screenWidth ?? 1920, screenHeight ?? 1080)
+    }
     var aspect: CGFloat { CGFloat(screen.width) / CGFloat(screen.height) }
 
     var directory: URL { Machines.directory(for: id) }
@@ -280,7 +285,7 @@ final class Machines: ObservableObject {
     /// two shapes, and a Mac fitted to one shows bars on the other. On an iPhone anything but 16:9 is the fit
     /// (MacSettingsView). A Mac with a saved session keeps its size, which the save is for; an iPad has one panel.
     func fittedForStart(_ mac: VirtualMac) -> VirtualMac {
-        guard !Device.isPad, !InstantResume.hasSave(for: mac) else { return mac }
+        guard !Device.isPad, !mac.isRetina, !InstantResume.hasSave(for: mac) else { return mac }
         let fit = Device.fitting(for: mac)
         let now = mac.screen
         // Only where a fit is not 16:9, which is an iPhone Duo's two screens: any other iPhone keeps what a Mac has.
