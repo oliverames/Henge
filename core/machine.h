@@ -71,6 +71,7 @@ typedef struct HvBlock {
 typedef struct HvStats {
     uint64_t blocks, translations, block_flushes;
     uint64_t evictions, evict_ticks, evict_blocks, evict_unchained; /* code-cache segments taken back, host ticks it took, blocks dropped, chained exits undone */
+    uint64_t evict_phase[3];  /* of those ticks: caches, blocks and hash; the slots; the instruction-cache lines */
     uint64_t flush_smc, flush_ic, flush_full;  /* why translations were dropped */
     uint64_t chained, ijc_fills, ijc_resets;
     uint64_t xchained;
