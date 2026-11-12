@@ -36,20 +36,10 @@ enum Device {
     static let retinaPPI = 264.0
 
     /// How round the screen's corners are, in points: UIScreen's own figure (private, read by name; 0 if a later iOS
-    /// drops it). iPads are left at 0: their corners are small and a Mac there sits inside its side insets.
+    /// drops it). For giving macOS the panel's shape, as a MacBook's device tree does.
     static var displayCornerRadius: CGFloat {
-        guard !isPad else { return 0 }
         let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first ?? UIScreen.main
         return (screen.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
-    }
-
-    /// How far down from the top a Mac's screen starts so its menu bar clears rounded corners: at that height the
-    /// corner's curve has come within `clear` points of the side, where the Apple menu and the clock are. The
-    /// curve is continuous (it starts further in than a circle of that radius), hence the 1.2.
-    static func menuBarClearance(cornerRadius r: CGFloat, clear: CGFloat = 4) -> CGFloat {
-        guard r > 0 else { return 0 }
-        let curve = r * 1.2
-        return max(0, (curve - (2 * curve * clear - clear * clear).squareRoot()).rounded(.up))
     }
 
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.

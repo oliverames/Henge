@@ -56,9 +56,8 @@ struct SessionView: View {
             let full = CGSize(width: geo.size.width + insets.leading + insets.trailing,
                               height: geo.size.height + insets.top + insets.bottom)
             let landscape = full.width > full.height
-            let band = Layout.cornerBand(full: full, landscape: landscape)
-            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: aspect, band: band)
-            let space = Layout.space(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, band: band)
+            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: aspect)
+            let space = Layout.space(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing)
             ZStack(alignment: .topLeading) {
                 (landscape || zoomed ? Color.black : Desk.page)
                 // One view in every layout: it holds the layer the engine draws into.
@@ -249,22 +248,13 @@ struct SessionView: View {
 
         /// The space the Mac's screen could fill, whatever its shape: on its side, not zoomed in and not typing.
         /// Elsewhere nil, and the Mac keeps the shape it has (upright, it sits small above the trackpad).
-        static func space(full: CGSize, insets: EdgeInsets, landscape: Bool, zoomed: Bool, typing: Bool, band: CGFloat) -> CGSize? {
+        static func space(full: CGSize, insets: EdgeInsets, landscape: Bool, zoomed: Bool, typing: Bool) -> CGSize? {
             guard landscape, !zoomed, !typing else { return nil }
             let side = Device.isPad && full.height >= 600 ? 2 * max(insets.leading, insets.trailing) : 0
-            return CGSize(width: full.width - side, height: full.height - band)
+            return CGSize(width: full.width - side, height: full.height)
         }
 
-        /// On its side, a phone squarer than 16:9 (iPhone Duo, either screen) has a Mac reaching into its rounded
-        /// corners, which would cut off the Apple menu and the clock. The Mac starts this far down, under a black
-        /// strip just tall enough for its menu bar to clear them; the bottom corners only round off the Dock's
-        /// empty ends. Wider phones leave the Mac between bars at its sides, clear of the corners already.
-        static func cornerBand(full: CGSize, landscape: Bool) -> CGFloat {
-            guard landscape, !Device.isPad, full.width / max(full.height, 1) < 16.0 / 9 + 0.05 else { return 0 }
-            return Device.menuBarClearance(cornerRadius: Device.displayCornerRadius)
-        }
-
-        init(full: CGSize, insets: EdgeInsets, landscape: Bool, zoomed: Bool, typing: Bool, centre: CGPoint, aspect: CGFloat, band: CGFloat) {
+        init(full: CGSize, insets: EdgeInsets, landscape: Bool, zoomed: Bool, typing: Bool, centre: CGPoint, aspect: CGFloat) {
             self.insets = insets
             let big = full.height >= 600 // an iPad on its side, or a window on one
             if zoomed {
@@ -281,13 +271,12 @@ struct SessionView: View {
             } else if landscape, big {
                 // Room to keep the controls off the Mac's menu bar, and the Mac above the on-screen keyboard.
                 let bar: CGFloat = 62
-                let room = typing ? full.height - insets.bottom - insets.top - bar - 8 : full.height - band
-                // An iPad keeps clear of its side insets; a big iPhone (iPhone Duo) fills edge to edge, under
-                // the corner strip.
+                let room = typing ? full.height - insets.bottom - insets.top - bar - 8 : full.height
+                // An iPad keeps clear of its side insets; a big iPhone (iPhone Duo) fills edge to edge.
                 let side = Device.isPad ? 2 * max(insets.leading, insets.trailing) : 0
                 let height = max(min(room, (full.width - side) / aspect), 200)
                 let width = height * aspect
-                let y = typing ? insets.top + bar : band + (room - height) / 2
+                let y = typing ? insets.top + bar : (full.height - height) / 2
                 screen = CGRect(x: (full.width - width) / 2, y: y, width: width, height: height)
                 touch = CGRect(origin: .zero, size: full)
                 fillsPhone = true
@@ -297,9 +286,9 @@ struct SessionView: View {
             } else if landscape {
                 // Edge to edge. Phones wider than the Mac fill the height with room to spare beside the
                 // Dynamic Island; a squarer phone (iPhone Duo) fills all of it, island and corners included.
-                let height = min(full.height - band, full.width / aspect)
+                let height = min(full.height, full.width / aspect)
                 let width = height * aspect
-                screen = CGRect(x: (full.width - width) / 2, y: band + (full.height - band - height) / 2, width: width, height: height)
+                screen = CGRect(x: (full.width - width) / 2, y: (full.height - height) / 2, width: width, height: height)
                 touch = CGRect(origin: .zero, size: full)
                 fillsPhone = true
                 toolsY = 0
@@ -641,7 +630,7 @@ struct SessionView: View {
         }
         HengeLog.log("session", "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)")
         // Fit and Retina follow the space the Mac is shown in; a size picked for speed or 16:9 stays as picked.
-        HengeLog.log("display", "corner radius \(Device.displayCornerRadius) pt, menu bar clearance \(Device.menuBarClearance(cornerRadius: Device.displayCornerRadius)) pt")
+        HengeLog.log("display", "corner radius \(Device.displayCornerRadius) pt")
         display.begin(screen: mac.screen, follows: mac.isRetina || mac.screen == Device.fittingScreen, retina: mac.isRetina)
         var rc: Int32 = -1
         if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
