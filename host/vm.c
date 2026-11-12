@@ -184,18 +184,22 @@ static uint8_t *adt_prop(uint8_t *dt, uint64_t len, const char *node, const char
     return adt_find(dt, len, node, prop, plen, NULL);
 }
 
-/* A u32 property added to a node, as its first: the rest of the tree moves up 40 bytes. Only into the slack between
-   the tree's end and its 16 KB page's (what iBoot leaves unused), and boot_args gets the new length. */
+/* A u32 property added to a node, as its first: the rest of the tree moves up 40 bytes. Only into slack: the zeros
+   between the last node's end and the length boot_args gives (iBoot rounds it up), or failing that between the length
+   and its 16 KB page's end, when boot_args gets the new length. */
 static int adt_add(uint8_t *dt, uint32_t *dtlen, uint64_t room, uint64_t node_at, const char *prop, uint32_t value) {
-    uint64_t len = *dtlen, at = node_at + 8;
-    if (len + 40 > room || at > len) return -1;
-    memmove(dt + at + 40, dt + at, len - at);
+    uint64_t len = *dtlen, at = node_at + 8, used;
+    if (adt_skip(dt, len, 0, &used) || at > used) return -1;
+    for (uint64_t i = used; i < len && i < used + 40; i++)
+        if (dt[i]) return -1; /* not slack after all */
+    if (used + 40 > (room > len ? room : len)) return -1;
+    memmove(dt + at + 40, dt + at, used - at);
     memset(dt + at, 0, 32);
     strncpy((char *)dt + at, prop, 31);
     *(uint32_t *)(dt + at + 32) = 4;
     *(uint32_t *)(dt + at + 36) = value;
     *(uint32_t *)(dt + node_at) += 1;
-    *dtlen = (uint32_t)(len + 40);
+    if (used + 40 > len) *dtlen = (uint32_t)(used + 40);
     return 0;
 }
 
@@ -249,8 +253,10 @@ static void adt_patch_poll(void) {
                     fprintf(stderr, "hengevm: adt patch: /%s %s added = %u (tree %llu -> %u bytes)\n", node, prop, value,
                             (unsigned long long)dtlen, *dtlen_at);
                 } else {
-                    fprintf(stderr, "hengevm: adt patch: no room to add /%s %s (tree %u bytes, room %llu)\n", node, prop,
-                            *dtlen_at, (unsigned long long)room);
+                    uint64_t used = 0;
+                    adt_skip(dt, *dtlen_at, 0, &used);
+                    fprintf(stderr, "hengevm: adt patch: no room to add /%s %s (tree %u bytes, %llu in nodes, page end %llu)\n", node,
+                            prop, *dtlen_at, (unsigned long long)used, (unsigned long long)room);
                 }
                 continue;
             }
