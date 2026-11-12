@@ -125,8 +125,111 @@ const char *hv_vm_reason_name(int r) {
     }
 }
 
+/* Experiment (HV_ADT_PATCH="node/prop=value,..."): u32 values put into the guest's device tree while the kernel
+   is young, before IOKit copies it into the registry. For the screen's shape: on a MacBook Pro, /product has
+   display-corner-radius and partially-occluded-display, which WindowServer builds the display's shape from. Only a
+   property already in the tree, with room for a u32, is changed: the tree is not grown.
+   Apple's device tree: node {u32 properties, u32 children, properties, children}; property {char name[32], u32
+   length (top bit a flag), value padded to 4}. boot_args has deviceTreeP (a kernel address) at +0x60 and its length
+   at +0x68. */
+static int adt_skip(const uint8_t *dt, uint64_t len, uint64_t at, uint64_t *next) {
+    if (at + 8 > len) return -1;
+    uint32_t nprops = *(const uint32_t *)(dt + at), nkids = *(const uint32_t *)(dt + at + 4);
+    at += 8;
+    for (uint32_t i = 0; i < nprops; i++) {
+        if (at + 36 > len) return -1;
+        at += 36 + ((*(const uint32_t *)(dt + at + 32) & 0x7fffffff) + 3) / 4 * 4;
+    }
+    for (uint32_t i = 0; i < nkids; i++)
+        if (adt_skip(dt, len, at, &at)) return -1;
+    *next = at;
+    return 0;
+}
+
+/* The property's value in the child of the root called `node`, or NULL. */
+static uint8_t *adt_prop(uint8_t *dt, uint64_t len, const char *node, const char *prop, uint32_t *plen) {
+    if (len < 8) return NULL;
+    uint32_t nprops = *(uint32_t *)dt, nkids = *(uint32_t *)(dt + 4);
+    uint64_t at = 8;
+    for (uint32_t i = 0; i < nprops; i++) {
+        if (at + 36 > len) return NULL;
+        at += 36 + ((*(uint32_t *)(dt + at + 32) & 0x7fffffff) + 3) / 4 * 4;
+    }
+    for (uint32_t k = 0; k < nkids; k++) {
+        uint64_t node_at = at, p = at + 8, next;
+        if (p > len) return NULL;
+        uint32_t n = *(uint32_t *)(dt + at);
+        uint8_t *found = NULL;
+        int named = 0;
+        for (uint32_t i = 0; i < n && p + 36 <= len; i++) {
+            uint32_t l = *(uint32_t *)(dt + p + 32) & 0x7fffffff;
+            if (!strncmp((char *)dt + p, "name", 32) && p + 36 + l <= len && !strncmp((char *)dt + p + 36, node, l)) named = 1;
+            if (!strncmp((char *)dt + p, prop, 32) && p + 36 + l <= len) found = dt + p + 36, *plen = l;
+            p += 36 + (l + 3) / 4 * 4;
+        }
+        if (named) return found;
+        if (adt_skip(dt, len, node_at, &next)) return NULL;
+        at = next;
+    }
+    return NULL;
+}
+
+static int adt_done;
+static double adt_first;
+static void adt_patch_poll(void) {
+    static const char *spec;
+    static int read;
+    static double last;
+    int done = adt_done;
+    double first = adt_first;
+    if (!read) read = 1, spec = getenv("HV_ADT_PATCH");
+    if (!spec || done || !board.ram) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+    if (!first) first = adt_first = now;
+    if (now - last < 0.02) return;
+    last = now;
+    if (now - first > 120) {
+        fprintf(stderr, "hengevm: adt patch: no boot_args in 2 minutes, given up\n");
+        adt_done = 1;
+        return;
+    }
+    uint64_t size = board.ram_size, limit = size < (1ull << 30) ? size : 1ull << 30;
+    for (uint64_t off = 0; off + 0x1000 <= limit; off += 0x4000) {
+        const uint8_t *b = board.ram + off;
+        const uint16_t *h = (const uint16_t *)b;
+        const uint64_t *q = (const uint64_t *)b;
+        if (h[0] < 2 || h[0] > 3 || h[1] < 1 || h[1] > 3) continue;
+        if (q[1] >> 40 != 0xfffffe || q[2] < VMAPPLE_MEM || q[2] >= VMAPPLE_MEM + size || q[3] == 0 || q[3] > size) continue;
+        uint64_t dtp = *(const uint64_t *)(b + 0x60), dtlen = *(const uint32_t *)(b + 0x68);
+        uint64_t pa = dtp - q[1] + q[2];
+        if (dtp < q[1] || pa < VMAPPLE_MEM || pa - VMAPPLE_MEM + dtlen > size || dtlen < 8) continue;
+        uint8_t *dt = board.ram + (pa - VMAPPLE_MEM);
+        adt_done = 1;
+        char buf[512];
+        snprintf(buf, sizeof buf, "%s", spec);
+        for (char *save, *item = strtok_r(buf, ",", &save); item; item = strtok_r(NULL, ",", &save)) {
+            char node[64], prop[33];
+            unsigned value;
+            if (sscanf(item, "%63[^/]/%32[^=]=%i", node, prop, (int *)&value) != 3) continue;
+            uint32_t l = 0;
+            uint8_t *v = adt_prop(dt, dtlen, node, prop, &l);
+            if (!v || l < 4) {
+                fprintf(stderr, "hengevm: adt patch: /%s %s not in the guest's tree (%s)\n", node, prop, v ? "too short" : "missing");
+                continue;
+            }
+            uint32_t was = *(uint32_t *)v;
+            *(uint32_t *)v = value;
+            fprintf(stderr, "hengevm: adt patch: /%s %s %u -> %u, %.2f s after the first look\n", node, prop, was, value, now - first);
+        }
+        return;
+    }
+}
+
 /* Host-side device work on CPU 0's thread each tick. */
 static void board_poll(void) {
+    adt_patch_poll();
     if (extra_poll) extra_poll();
     if (net_on) hv_net_poll();
 }
@@ -324,6 +427,7 @@ void hv_vm_destroy(void) {
     ncpus = 0;
     boot_args_offset = 0;
     boot_last_scan = 0;
+    adt_done = 0, adt_first = 0; /* a new boot gets a new tree */
     extra_poll = NULL;
     machine_created = 0;
 }
