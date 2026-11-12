@@ -48,10 +48,40 @@ struct Trackpad: UIViewRepresentable {
             isMultipleTouchEnabled = true
             backgroundColor = .clear
             addInteraction(UIPointerInteraction(delegate: self))
+            // Proof for the device log of whether a system pointer (AssistiveTouch's, on iPhone) reaches this view.
+            addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:))))
+        }
+
+        private var pointerCallsLogged = 0, hoversLogged = 0
+        private func logPointer(_ what: String) {
+            guard pointerCallsLogged < 40 else { return }
+            pointerCallsLogged += 1
+            HengeLog.log("input", "pointer interaction: \(what)")
+        }
+
+        @objc private func hovered(_ g: UIHoverGestureRecognizer) {
+            guard hoversLogged < 40 else { return }
+            hoversLogged += 1
+            let p = g.location(in: self)
+            HengeLog.log("input", "pointer hover \(g.state.rawValue) at \(Int(p.x)), \(Int(p.y))")
         }
 
         /// Over the Mac there is only the Mac's pointer, if iPadOS hasn't locked its own away.
-        func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? { .hidden() }
+        func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+            logPointer("style asked, answered hidden")
+            return .hidden()
+        }
+
+        /// One region, the whole surface, so the hidden style never lapses back to the system pointer between regions.
+        func pointerInteraction(_ interaction: UIPointerInteraction, regionFor request: UIPointerRegionRequest,
+                                defaultRegion: UIPointerRegion) -> UIPointerRegion? {
+            logPointer("region asked at \(Int(request.location.x)), \(Int(request.location.y))")
+            return UIPointerRegion(rect: bounds)
+        }
+
+        func pointerInteraction(_ interaction: UIPointerInteraction, willEnter region: UIPointerRegion, animator: UIPointerInteractionAnimating) {
+            logPointer("pointer entered the trackpad")
+        }
 
         required init?(coder: NSCoder) { fatalError("made in code") }
 
