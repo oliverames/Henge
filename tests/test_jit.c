@@ -13,12 +13,13 @@ DECLARE_PROGRAM(pcrel);
 DECLARE_PROGRAM(long_block);
 DECLARE_PROGRAM(pstate_bits);
 DECLARE_PROGRAM(pac);
+DECLARE_PROGRAM(hop);
 extern const char jit_programs_begin[], jit_programs_finish[];
 
 static const TestProgram programs[] = {
     TEST_PROGRAM(arith),   TEST_PROGRAM(loop),   TEST_PROGRAM(condbr),
     TEST_PROGRAM(csel_ops), TEST_PROGRAM(bl_sub), TEST_PROGRAM(simd_fp),
-    TEST_PROGRAM(stolen),  TEST_PROGRAM(pcrel),  TEST_PROGRAM(long_block), TEST_PROGRAM(pstate_bits),
+    TEST_PROGRAM(stolen),  TEST_PROGRAM(pcrel),  TEST_PROGRAM(long_block), TEST_PROGRAM(pstate_bits), TEST_PROGRAM(hop),
 };
 
 int main(void) {
@@ -118,8 +119,8 @@ int main(void) {
         printf("with a 64 KB ring of %u segments: %llu evictions (%llu blocks dropped, %llu exits unchained), %llu full flushes\n",
                ring.jit.nseg, (unsigned long long)ring.stats.evictions, (unsigned long long)ring.stats.evict_blocks,
                (unsigned long long)ring.stats.evict_unchained, (unsigned long long)ring.stats.block_flushes);
-        if (!ring.stats.evictions || ring.stats.block_flushes) {
-            printf("ring: expected evictions and no full flush: FAIL\n");
+        if (!ring.stats.evictions || !ring.stats.evict_unchained || ring.stats.block_flushes) {
+            printf("ring: expected evictions that undo chained exits, and no full flush: FAIL\n");
             bad_rounds++;
         }
         failed += bad_rounds;
