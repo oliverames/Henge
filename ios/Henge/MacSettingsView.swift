@@ -7,6 +7,7 @@ struct MacSettingsView: View {
     @State private var mac: VirtualMac
     @State private var confirmDelete = false
     @State private var movingExport = false
+    @State private var growTo: Int?
     @AppStorage("henge.cpus") private var cpus = 4
 
     init(mac: VirtualMac) { _mac = State(initialValue: mac) }
@@ -98,6 +99,18 @@ struct MacSettingsView: View {
                         Text("of \(ByteText.string(UInt64(max(mac.diskBytes, 0))))").font(.system(size: 16)).foregroundStyle(Desk.dim)
                     }
                     DeskBar(fraction: Double(mac.bytesUsed) / Double(max(mac.diskBytes, 1)))
+                    let sizes = DiskGrowth.choices(currentBytes: mac.diskBytes)
+                    if !sizes.isEmpty {
+                        Menu {
+                            ForEach(sizes, id: \.self) { gb in Button("\(gb) GB") { growTo = gb } }
+                        } label: {
+                            Text("Make the Disk Larger…")
+                                .font(.system(size: 15, weight: .semibold)).foregroundStyle(Desk.accentLight)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        Text("Disks can only grow. Afterwards, start the Mac and run this in its Terminal so macOS uses the new space: \(DiskGrowth.guestCommand)")
+                            .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                    }
                 }
                 .padding(17)
                 .deskCard()
@@ -118,6 +131,16 @@ struct MacSettingsView: View {
             case .success: machines.lastExport = nil
             case .failure(let error): machines.lastError = error.localizedDescription
             }
+        }
+        .confirmationDialog("Make the disk \(growTo ?? 0) GB?", isPresented: Binding(get: { growTo != nil }, set: { if !$0 { growTo = nil } }), titleVisibility: .visible) {
+            Button("Make It Larger") {
+                if let gb = growTo {
+                    do { mac = try machines.growDisk(mac, toGB: gb) } catch { machines.lastError = error.localizedDescription }
+                }
+                growTo = nil
+            }
+        } message: {
+            Text("This cannot be undone and the disk cannot be made smaller, so back up first. The saved state for instant resume is discarded, so the next start boots the Mac afresh. Then start the Mac and run this in Terminal: \(DiskGrowth.guestCommand)")
         }
         .confirmationDialog("Delete \(mac.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {

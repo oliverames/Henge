@@ -280,3 +280,11 @@ $(B)/test_remote_pairing_choice: ios/HengeJITHelper/RemotePairingChoice.swift te
 test-remote-pairing-choice: $(B)/test_remote_pairing_choice
 	$(B)/test_remote_pairing_choice
 .PHONY: test-remote-pairing-choice
+
+# Which disk sizes a Mac is offered, and when growing is refused.
+$(B)/test_disk_growth: ios/Henge/DiskGrowth.swift tests/test_disk_growth.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-disk-growth: $(B)/test_disk_growth
+	$(B)/test_disk_growth
+.PHONY: test-disk-growth
