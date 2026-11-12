@@ -367,52 +367,6 @@ static void test_virtio_blk(HvDisk *aux) {
     hv_virtio_blk_drain(board.aux_blk); /* requests complete on the worker thread */
     check("unknown request UNSUPP", ram(status)[0], 2);
     check("four requests used", used_idx(ring), 4);
-
-    /* Discard: leaves the bytes, unless a panic's log is among them (macOS lets go of a read one this way).
-       Write zeroes: zeroes. */
-    check("blk discard: as many sectors as the disk has", rd32(bar + 0x2000 + 36), (uint32_t)(aux->size / 512));
-    static uint8_t kept[8 * 512], now[8 * 512], none[8 * 512];
-    memset(kept, 0xa5, sizeof kept);
-    hv_disk_write(aux, 40 * 512, kept, sizeof kept);
-    uint64_t range[2] = {40, 8}; /* sector; sectors, flags 0 */
-    h[0] = 11;
-    h[2] = 0;
-    memcpy(ram(hdr), h, 16);
-    memcpy(ram(data), range, 16);
-    put_desc(ring, 3, hdr, 16, 1, 4);
-    put_desc(ring, 4, data, 16, 1, 5);
-    put_desc(ring, 5, status, 1, 2, 0);
-    offer(ring, 3);
-    wr16(bar + 0x3000, 0);
-    hv_virtio_blk_drain(board.aux_blk);
-    hv_disk_read(aux, 40 * 512, now, sizeof now);
-    check("blk discard status", ram(status)[0], 0);
-    check("blk discard leaves other bytes", memcmp(now, kept, sizeof now), 0);
-    hv_disk_write(aux, 41 * 512 + 500, "panic(cpu 3 caller 0x0): test", 29); /* across two sectors */
-    offer(ring, 3);
-    wr16(bar + 0x3000, 0);
-    hv_virtio_blk_drain(board.aux_blk);
-    hv_disk_read(aux, 40 * 512, now, sizeof now);
-    check("blk discard status, over a panic's log", ram(status)[0], 0);
-    check("blk discard zeroes a panic's log", memcmp(now, none, sizeof now), 0);
-    hv_disk_write(aux, 48 * 512, kept, 512);
-    range[0] = 48, range[1] = 1;
-    h[0] = 13;
-    memcpy(ram(hdr), h, 16);
-    memcpy(ram(data), range, 16);
-    offer(ring, 3);
-    wr16(bar + 0x3000, 0);
-    hv_virtio_blk_drain(board.aux_blk);
-    hv_disk_read(aux, 48 * 512, now, 512);
-    check("blk write zeroes status", ram(status)[0], 0);
-    check("blk write zeroes zeroes", memcmp(now, none, 512), 0);
-    range[0] = aux->size / 512, range[1] = 1; /* past the end */
-    memcpy(ram(data), range, 16);
-    offer(ring, 3);
-    wr16(bar + 0x3000, 0);
-    hv_virtio_blk_drain(board.aux_blk);
-    check("blk write zeroes past the end refused", ram(status)[0], 1);
-    check("eight requests used", used_idx(ring), 8);
     rd8(bar + 0x1000);
 }
 
