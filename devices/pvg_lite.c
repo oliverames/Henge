@@ -98,6 +98,7 @@ struct HvPvgLite {
     uint64_t display_taken;  /* the same for the list the guest acked last */
     uint32_t display_bits;   /* +1014: displays with an event for the guest */
     int display_reads_logged;
+    int external; /* HV_PVG_EXTERNAL=1: answer as an external display (no rounded corners), read once per machine */
 };
 
 /* What the guest's GetDeviceInfo asks for: key, value pairs, as the framework
@@ -236,13 +237,6 @@ static void display_announce(HvPvgLite *p, uint8_t *d, uint32_t events) {
     __atomic_store_n((uint32_t *)(d + 0xfc0), 1, __ATOMIC_RELEASE);
 }
 
-/* The Mac's panel is built in (macOS draws its rounded corners) unless HV_PVG_EXTERNAL=1. */
-static int pvg_external(void) {
-    static int v = -1;
-    if (v < 0) v = getenv("HV_PVG_EXTERNAL") && atoi(getenv("HV_PVG_EXTERNAL"));
-    return v;
-}
-
 static void display_set_page(HvPvgLite *p, uint64_t pa) {
     uint8_t *d = hv_phys_ptr(p->m, pa, 0x4000);
     if (!d) return;
@@ -255,7 +249,7 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
     PUT32(0x20, 3);
     /* +60 flags: 0 or 2 makes the driver mark the display external (no rounded-corner artwork); any other bit makes it
        the primary built-in panel. HV_PVG_EXTERNAL=1 keeps it external. */
-    PUT32(0x60, pvg_external() ? 0 : 1);
+    PUT32(0x60, p->external ? 0 : 1);
     p->display_gen = atomic_load(&display_gen);
     uint64_t size = atomic_load(&display_size);
     p->display_mode = size, p->display_ppmm = atomic_load(&display_ppmm);
@@ -850,7 +844,7 @@ static uint64_t gfx_read(void *opaque, uint64_t off, unsigned size) {
         v = __atomic_exchange_n(&p->status, 0, __ATOMIC_ACQ_REL);
         break;
     case 0x122c: v = 1; break;
-    case 0x1234: v = pvg_external() ? 0 : 1; break; /* port 0 built in, not external */
+    case 0x1234: v = p->external ? 0 : 1; break; /* port 0 built in, not external */
     case 0x1014: /* displays with an event, cleared by the read */
         v = __atomic_exchange_n(&p->display_bits, 0, __ATOMIC_ACQ_REL);
         if (v && p->display_reads_logged++ < 4) fprintf(stderr, "hengevm: pvg-lite: guest reads +1014 = %llx\n", (unsigned long long)v);
@@ -904,6 +898,7 @@ HvPvgLite *hv_pvg_lite_create(HvMachine *m, HvGic *gic, uint64_t gfx_pa, uint64_
     p->iosfc_irq = iosfc_irq;
     p->log = getenv("HV_PVG_LITE_LOG") != NULL;
     p->tally = getenv("HV_PVG_TALLY") != NULL;
+    p->external = getenv("HV_PVG_EXTERNAL") && atoi(getenv("HV_PVG_EXTERNAL"));
     hv_machine_add_mmio(m, gfx_pa, 0x10000, p, gfx_read, gfx_write, "gfx");
     hv_machine_add_mmio(m, iosfc_pa, 0x10000, p, iosfc_read, iosfc_write, "iosurface");
     return p;
