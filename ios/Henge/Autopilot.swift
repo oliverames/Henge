@@ -23,7 +23,8 @@ import UIKit
 ///   screen W H         act as if the device's space for the Mac were W x H points (a rotation, a fold or unfold),
 ///                      so a Mac that follows its space is asked for that size; "screen off" goes back to the real one
 ///   check [NAME]       what the device's panel shows: the Mac's screen where the layout puts it, cut by the panel's
-///                      rounded corners, into Documents/NAME.png (check.png), and the sizes and corners into the log
+///                      rounded corners, with the pointer at the size Henge draws it, into Documents/NAME.png
+///                      (check.png), and the sizes, corners and pointer into the log
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
 ///   exit               quit Henge
@@ -221,6 +222,7 @@ enum Autopilot {
         let hidden = r > barMiddle ? r - (r * r - (r - barMiddle) * (r - barMiddle)).squareRoot() : 0
         HengeLog.log("check", String(format: "corner radius %.0f pt = %.0f Mac px; at the menu bar's middle (y %.0f) the first %.0f Mac px of each side are hidden; diagonal depth %.0f Mac px", radius, r, barMiddle, hidden, r * (1 - 1 / 2.0.squareRoot())))
         guard let image = MacPreview.capture(width: mac.width, height: mac.height) else { HengeLog.log("check", "no screen to read"); return }
+        let pointer = pointerOnDevice(mac: mac, picture: picture)
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
         format.opaque = true
@@ -229,10 +231,40 @@ enum Autopilot {
             ctx.fill(CGRect(origin: .zero, size: full))
             UIBezierPath(roundedRect: CGRect(origin: .zero, size: full), cornerRadius: radius).addClip()
             UIImage(cgImage: image).draw(in: picture)
+            if let pointer { pointer.image.draw(in: pointer.rect) }
         }
         let url = docs.appendingPathComponent("\(name).png")
         if (try? png.write(to: url, options: .atomic)) != nil {
             HengeLog.log("check", "\(url.lastPathComponent), \(png.count / 1024) KB")
         }
+    }
+
+    /// The pointer as Henge draws it over the Mac's screen: its glyph at Henge's scale, where the Mac says it is, in
+    /// device points. Logged: the glyph, the scale, and the size it comes out on the device.
+    @MainActor private static func pointerOnDevice(mac: DisplayRouter.Size, picture: CGRect) -> (image: UIImage, rect: CGRect)? {
+        var w: UInt32 = 0, h: UInt32 = 0
+        var hx: Int32 = 0, hy: Int32 = 0, scale: Int32 = 0, shown: Int32 = 0
+        var glyph = [UInt8](repeating: 0, count: 512 * 512 * 4)
+        guard henge_vm_cursor(&glyph, glyph.count, &w, &h, &hx, &hy, &scale, &shown) == 0, w > 0, h > 0, w <= 512, h <= 512 else {
+            HengeLog.log("check", "pointer: none from macOS yet")
+            return nil
+        }
+        var px: Int32 = 0, py: Int32 = 0
+        let at = henge_vm_pointer(&px, &py) == 0
+        let perMac = picture.width / CGFloat(max(mac.width, 1)) // device points per Mac pixel
+        let size = CGSize(width: CGFloat(w) * CGFloat(scale) * perMac, height: CGFloat(h) * CGFloat(scale) * perMac)
+        HengeLog.log("check", String(format: "pointer glyph %ux%u hot %d,%d, Henge scale %d, drawn %ux%u Mac px = %.1fx%.1f pt on the device, %@, %@",
+                                     w, h, hx, hy, scale, w * UInt32(scale), h * UInt32(scale), size.width, size.height,
+                                     shown != 0 ? "shown" : "hidden", at ? "at \(px),\(py)" : "position unknown"))
+        guard at, shown != 0 else { return nil }
+        let bytes = glyph.prefix(Int(w * h * 4))
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let cg = CGImage(width: Int(w), height: Int(h), bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Int(w) * 4,
+                               space: CGColorSpaceCreateDeviceRGB(),
+                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
+        let origin = CGPoint(x: picture.minX + (CGFloat(px) - CGFloat(hx * scale)) * perMac,
+                             y: picture.minY + (CGFloat(py) - CGFloat(hy * scale)) * perMac)
+        return (UIImage(cgImage: cg), CGRect(origin: origin, size: size))
     }
 }
