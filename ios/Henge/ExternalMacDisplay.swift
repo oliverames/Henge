@@ -2,24 +2,67 @@ import SwiftUI
 
 /// The accessory only presents the existing Mac's pixels. It never owns or
 /// starts a VM, and hardware input continues through the phone's SessionView.
+/// The Mac takes the display's own shape and pixels while it is shown there (DisplayRouter).
 struct ExternalMacDisplay: View {
     let presentation: MacPresentation
-    /// The id this display's view connects to the router under; a display scene passes its own.
-    var surface = UUID()
+    /// The id this display's view connects to the router under; a display scene passes its own. Kept as state:
+    /// the accessory makes this view again at every update, and the size it asks for is filed under this id.
+    @State private var surface: UUID
+    @ObservedObject private var display: DisplayRouter
+
+    init(presentation: MacPresentation, surface: UUID = UUID()) {
+        self.presentation = presentation
+        _surface = State(initialValue: surface)
+        display = presentation.display
+    }
 
     var body: some View {
         GeometryReader { geometry in
-            let aspect = presentation.aspect
+            let aspect = display.aspect ?? presentation.aspect
             let width = min(geometry.size.width, geometry.size.height * aspect)
             BootDisplay(display: presentation.display, role: .external, surface: surface)
                 .frame(width: width, height: width / aspect)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(DisplayScale { scale in want(geometry.size, scale: scale) })
+                .onChange(of: geometry.size) { want($0) }
         }
         .background(.black)
         .ignoresSafeArea()
         .allowsHitTesting(false)
         .preferredColorScheme(.dark)
     }
+
+    @State private var scale: CGFloat = 0
+
+    private func want(_ size: CGSize, scale: CGFloat? = nil) {
+        if let scale { self.scale = scale }
+        guard self.scale > 0 else { return }
+        display.want(DisplayRouter.Size.external(size, scale: self.scale), on: surface)
+    }
+}
+
+/// The scale of the screen a view is on (an external display's own, which UIScreen.main is not), once it is on one.
+private struct DisplayScale: UIViewRepresentable {
+    let found: (CGFloat) -> Void
+
+    final class Probe: UIView {
+        var found: ((CGFloat) -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let screen = window?.windowScene?.screen else { return }
+            let scale = screen.nativeScale
+            DispatchQueue.main.async { [found] in found?(scale) }
+        }
+    }
+
+    func makeUIView(context: Context) -> Probe {
+        let view = Probe()
+        view.isUserInteractionEnabled = false
+        view.found = found
+        return view
+    }
+
+    func updateUIView(_ view: Probe, context: Context) { view.found = found }
 }
 
 /// Puts the session's Mac on an external display. iOS 27 delivers that scene only to this

@@ -31,7 +31,15 @@ enum Device {
     }
     static var retinaMM: (width: Int, height: Int) {
         let s = retinaScreen
-        return (Int((Double(s.width) / 264 * 25.4).rounded()), Int((Double(s.height) / 264 * 25.4).rounded()))
+        return (Int((Double(s.width) / retinaPPI * 25.4).rounded()), Int((Double(s.height) / retinaPPI * 25.4).rounded()))
+    }
+    static let retinaPPI = 264.0
+
+    /// How round the screen's corners are, in points: UIScreen's own figure (private, read by name; 0 if a later iOS
+    /// drops it). For giving macOS the panel's shape, as a MacBook's device tree does.
+    static var displayCornerRadius: CGFloat {
+        let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first ?? UIScreen.main
+        return (screen.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
     }
 
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.

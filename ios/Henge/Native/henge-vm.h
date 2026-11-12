@@ -76,8 +76,13 @@ void henge_share_set_clipboard(const char *text);
 char *henge_share_take_clipboard(void);
 long henge_share_agent_seen(void);
 
-/* The size macOS is told its screen is. Before henge_vm_boot. */
+/* The size macOS is told its screen is. Before henge_vm_boot, and again whenever the space it is shown in changes:
+   a running Mac gets the new size as a new mode list and macOS switches to it. */
 void henge_vm_set_display(uint32_t width, uint32_t height);
+/* A new size for a running Mac with its density in pixels per mm (0: the default, a ~122 ppi 1x screen). */
+void henge_vm_set_display_live(uint32_t width, uint32_t height, float px_per_mm);
+/* The size macOS took last (it acked the mode list). 0, or -1 before it has taken one. */
+int henge_vm_display_size(uint32_t *width, uint32_t *height);
 /* The panel's physical size; 0, 0 for the default (a ~122 ppi, 1x screen). Before boot. */
 void henge_vm_set_display_mm(uint32_t width_mm, uint32_t height_mm);
 void henge_vm_key(uint16_t code, int down);
