@@ -31,8 +31,9 @@ enum Device {
     }
     static var retinaMM: (width: Int, height: Int) {
         let s = retinaScreen
-        return (Int((Double(s.width) / 264 * 25.4).rounded()), Int((Double(s.height) / 264 * 25.4).rounded()))
+        return (Int((Double(s.width) / retinaPPI * 25.4).rounded()), Int((Double(s.height) / retinaPPI * 25.4).rounded()))
     }
+    static let retinaPPI = 264.0
 
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.
     static var suggestedRAMGB: Int {

@@ -102,6 +102,8 @@ void hv_vm_touch_frame(uint32_t ts_ms); /* commit one frame with every finger th
 void hv_vm_touch_button(int down); /* the pad's full press (a click) */
 /* Where the guest has its pointer, in display pixels. 0, or -1 before it has one. */
 int hv_vm_pointer(int *x, int *y);
+/* The display mode the guest took last. 0, or -1 before it has taken one. */
+int hv_vm_display_size(uint32_t *width, uint32_t *height);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int hv_vm_snapshot(uint8_t *bgra, int width, int height);
 

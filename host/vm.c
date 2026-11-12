@@ -750,6 +750,11 @@ int hv_vm_pointer(int *x, int *y) {
     return 0;
 }
 
+int hv_vm_display_size(uint32_t *width, uint32_t *height) {
+    HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
+    return pvg ? hv_pvg_lite_display_mode(pvg, width, height) : -1;
+}
+
 int hv_vm_snapshot(uint8_t *bgra, int width, int height) {
     HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
     if (!pvg || width <= 0 || height <= 0) return -1;

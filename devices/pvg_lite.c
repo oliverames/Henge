@@ -90,6 +90,11 @@ struct HvPvgLite {
     int metal_tried;
     uint32_t stamps_pending; /* channels Metal finished, for the next poll */
     uint64_t vblanks;        /* refresh events sent (HV_PVG_VBLANK) */
+    uint32_t display_gen;    /* the size generation the guest was last told of */
+    uint32_t display_seq;    /* the mode list's sequence number, which the guest acks */
+    uint64_t display_mode;   /* width << 32 | height last told */
+    float display_ppmm;      /* and the density that went with it */
+    uint64_t display_taken;  /* the same for the list the guest acked last */
 };
 
 /* What the guest's GetDeviceInfo asks for: key, value pairs, as the framework
@@ -156,20 +161,63 @@ static void ring_read(HvPvgLite *p, const uint32_t *table, uint32_t size, uint32
     }
 }
 
-/* The one mode the display offers. macOS takes the size it is given at boot. */
-static uint32_t display_w = 1920, display_h = 1080;
-/* The panel's real size, when known: macOS works out the pixel density from it and
-   picks HiDPI (2x) for a Retina-dense panel, as on a real Mac. 0 = the old 400 mm. */
-static uint32_t display_mm_w, display_mm_h;
+/* The one mode the display offers: the size it is given before boot, and any size given while macOS runs (a window
+   or a display of another shape), which goes to the guest as a new mode list. Width in the high half, height in the
+   low, so a change is one store; the generation says one happened. */
+static _Atomic uint64_t display_size = (uint64_t)1920 << 32 | 1080;
+static _Atomic uint32_t display_gen = 1;
+/* The panel's real size, when known: macOS works out the pixel density from it and picks HiDPI (2x) for a
+   Retina-dense panel, as on a real Mac. Kept as pixels per mm so a new size keeps the density. 0 = the old 400 mm. */
+static _Atomic float display_ppmm;
 
 void hv_pvg_lite_set_size_mm(uint32_t width_mm, uint32_t height_mm) {
-    display_mm_w = width_mm;
-    display_mm_h = height_mm;
+    uint32_t w = (uint32_t)(atomic_load(&display_size) >> 32);
+    (void)height_mm;
+    atomic_store(&display_ppmm, width_mm && height_mm ? (float)w / (float)width_mm : 0.0f);
+    atomic_fetch_add(&display_gen, 1);
+}
+
+void hv_pvg_lite_set_mode_density(uint32_t width, uint32_t height, float px_per_mm) {
+    if (!width || !height) return;
+    atomic_store(&display_ppmm, px_per_mm > 0 ? px_per_mm : 0.0f);
+    atomic_store(&display_size, (uint64_t)width << 32 | height);
+    atomic_fetch_add(&display_gen, 1);
 }
 
 void hv_pvg_lite_set_mode(uint32_t width, uint32_t height) {
-    display_w = width;
-    display_h = height;
+    if (!width || !height) return;
+    uint64_t want = (uint64_t)width << 32 | height;
+    if (atomic_exchange(&display_size, want) != want) atomic_fetch_add(&display_gen, 1);
+}
+
+/* The mode list and what goes with it, as the guest reads it: physical size, then the one mode at its rate. */
+static void display_put_modes(uint8_t *d, uint32_t w, uint32_t h) {
+#define PUT32(off, v) (*(uint32_t *)(d + (off)) = (uint32_t)(v))
+#define PUTF(off, v) (*(float *)(d + (off)) = (v))
+    float ppmm = atomic_load(&display_ppmm);
+    uint32_t width_mm = 400, height_mm = 400 * h / w; /* the same pixel density at any shape */
+    if (ppmm > 0) width_mm = (uint32_t)(w / ppmm + 0.5f), height_mm = (uint32_t)(h / ppmm + 0.5f);
+    PUT32(0x14, height_mm << 16 | width_mm);
+    PUTF(0x24, (float)width_mm);
+    PUTF(0x28, (float)height_mm);
+    PUT32(0x208, 1); /* one mode: */
+    PUT32(0x210, h << 16 | w);
+    {   /* m4 fork: 120 Hz on ProMotion (HV_HZ), so WindowServer animates at the panel's rate */
+        const char *hz = getenv("HV_HZ");
+        uint32_t r = hz && atoi(hz) > 0 ? (uint32_t)atoi(hz) : 60;
+        PUT32(0x214, r << 16);
+    }
+#undef PUT32
+#undef PUTF
+}
+
+/* Tells the guest the mode list changed: a new sequence number for it to ack, and the mode-change event. */
+static void display_announce(HvPvgLite *p, uint8_t *d) {
+    p->display_seq++;
+    *(uint32_t *)(d + 0x200) = p->display_seq;
+    d[0xfa9] = 1;                    /* ack pending */
+    *(uint32_t *)(d + 0xfc0) = 1;    /* state: told the guest, waiting for the ack */
+    __atomic_fetch_or((uint32_t *)(d + 0x100), 4, __ATOMIC_RELEASE); /* mode change: read when the guest sets its mask */
 }
 
 static void display_set_page(HvPvgLite *p, uint64_t pa) {
@@ -179,29 +227,19 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
 #define PUT32(off, v) (*(uint32_t *)(d + (off)) = (uint32_t)(v))
 #define PUTF(off, v) (*(float *)(d + (off)) = (v))
     PUT32(0x00, 1);
-    uint32_t width_mm = 400, height_mm = 400 * display_h / display_w; /* the same pixel density at any shape */
-    if (display_mm_w && display_mm_h) width_mm = display_mm_w, height_mm = display_mm_h;
-    PUT32(0x14, height_mm << 16 | width_mm);
     PUT32(0x18, 0x01000100);
     PUT32(0x1c, 0x400);
     PUT32(0x20, 3);
-    PUTF(0x24, (float)width_mm);
-    PUTF(0x28, (float)height_mm);
-    PUT32(0x208, 1); /* one mode: */
-    PUT32(0x210, display_h << 16 | display_w);
-    {   /* m4 fork: 120 Hz on ProMotion (HV_HZ), so WindowServer animates at the panel's rate */
-        const char *hz = getenv("HV_HZ");
-        uint32_t r = hz && atoi(hz) > 0 ? (uint32_t)atoi(hz) : 60;
-        PUT32(0x214, r << 16);
-    }
+    p->display_gen = atomic_load(&display_gen);
+    uint64_t size = atomic_load(&display_size);
+    p->display_mode = size, p->display_ppmm = atomic_load(&display_ppmm);
+    display_put_modes(d, (uint32_t)(size >> 32), (uint32_t)size);
     PUTF(0xa10, 1.0f); /* identity colour matrix */
     PUTF(0xa24, 1.0f);
     PUTF(0xa38, 1.0f);
     d[0xa73] = 1;
-    PUT32(0x200, 1); /* the mode list's sequence number, which the guest acks */
-    d[0xfa9] = 1;    /* ack pending */
-    PUT32(0xfc0, 1); /* state: told the guest, waiting for the ack */
-    __atomic_store_n((uint32_t *)(d + 0x100), 4, __ATOMIC_RELEASE); /* mode change: read when the guest sets its mask */
+    p->display_seq = 0;
+    display_announce(p, d);
 #undef PUT32
 #undef PUTF
 }
@@ -209,9 +247,39 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
 static void display_ack(HvPvgLite *p, uint32_t seq) {
     uint8_t *d = p->display_pa ? hv_phys_ptr(p->m, p->display_pa, 0x4000) : NULL;
     if (!d) return;
+    fprintf(stderr, "hengevm: pvg-lite: display ack %u (published %u, %ux%u)\n", seq, p->display_seq,
+            (unsigned)(p->display_mode >> 32), (unsigned)p->display_mode);
     *(uint32_t *)(d + 0xfbc) = seq;
+    if (seq != p->display_seq) return; /* an older list's ack: the newer one is still waiting */
     d[0xfa9] = 0;
     *(uint32_t *)(d + 0xfc0) = 2;
+    __atomic_store_n(&p->display_taken, p->display_mode, __ATOMIC_RELEASE);
+}
+
+int hv_pvg_lite_display_mode(HvPvgLite *p, uint32_t *width, uint32_t *height) {
+    uint64_t mode = p ? __atomic_load_n(&p->display_taken, __ATOMIC_ACQUIRE) : 0;
+    if (!mode) return -1;
+    *width = (uint32_t)(mode >> 32), *height = (uint32_t)mode;
+    return 0;
+}
+
+/* A size given while macOS runs: once the guest has taken the last list (no ack pending), it gets the new one. Device
+   lock held. */
+static void display_follow(HvPvgLite *p) {
+    uint32_t gen = atomic_load_explicit(&display_gen, memory_order_acquire);
+    if (gen == p->display_gen || !p->display_pa) return;
+    uint8_t *d = hv_phys_ptr(p->m, p->display_pa, 0x4000);
+    if (!d || __atomic_load_n(&d[0xfa9], __ATOMIC_ACQUIRE)) return;
+    p->display_gen = gen;
+    uint64_t size = atomic_load(&display_size);
+    float ppmm = atomic_load(&display_ppmm);
+    if (size == p->display_mode && ppmm == p->display_ppmm) return; /* nothing the guest has not got */
+    p->display_mode = size, p->display_ppmm = ppmm;
+    display_put_modes(d, (uint32_t)(size >> 32), (uint32_t)size);
+    display_announce(p, d);
+    fprintf(stderr, "hengevm: pvg-lite: display mode %ux%u (seq %u, mask %x)\n", (unsigned)(size >> 32), (unsigned)size,
+            p->display_seq, *(uint32_t *)(d + 0x104));
+    hv_gicv3_pend(p->gic, p->gfx_irq);
 }
 
 static int task_read(HvPvgLite *p, uint32_t task, uint64_t off, void *to, uint32_t n);
@@ -734,6 +802,7 @@ static void vblank(HvPvgLite *p) {
 void hv_pvg_lite_poll(HvPvgLite *p) {
     if (!p) return;
     vblank(p);
+    display_follow(p);
     uint32_t chans = p->chan_pending;
     if (chans) {
         p->chan_pending = 0;
@@ -861,6 +930,16 @@ int hv_pvg_lite_set_state(HvPvgLite *p, const void *in, size_t len) {
     memcpy(p->task_root, s->task_root, sizeof s->task_root);
     memcpy(p->task_objects, s->task_objects, sizeof s->task_objects);
     memcpy(p->task_placement, s->task_placement, sizeof s->task_placement);
+    /* What the guest was last told is on its display page; a size set since (another screen) follows on the next poll. */
+    const uint8_t *d = p->display_pa ? hv_phys_ptr(p->m, p->display_pa, 0x4000) : NULL;
+    if (d) {
+        uint32_t mode = *(const uint32_t *)(d + 0x210);
+        p->display_seq = *(const uint32_t *)(d + 0x200);
+        p->display_mode = (uint64_t)(mode & 0xffff) << 32 | mode >> 16;
+        p->display_ppmm = atomic_load(&display_ppmm);
+        p->display_gen = 0;
+        if (!d[0xfa9]) __atomic_store_n(&p->display_taken, p->display_mode, __ATOMIC_RELEASE);
+    }
     return 0;
 }
 
