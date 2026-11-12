@@ -279,6 +279,21 @@ final class Machines: ObservableObject {
         save()
     }
 
+    /// Makes a stopped Mac's disk larger. The file is sparse, so nothing is written; the engine reads the size from the
+    /// file at the next start. A saved instant-resume state belongs to the disk as it was, so it goes.
+    func growDisk(_ mac: VirtualMac, toGB gb: Int) throws -> VirtualMac {
+        let current = (try FileManager.default.attributesOfItem(atPath: mac.disk.path)[.size] as? Int64) ?? mac.diskBytes
+        if let why = DiskGrowth.refusal(vmState: henge_vm_state(), currentBytes: current, newGB: gb) { throw message(why) }
+        InstantResume.discard(for: mac)
+        let note: String
+        do { note = try DiskGrowth.grow(path: mac.disk.path, to: Int64(gb) << 30) } catch { throw message("\(error)") }
+        var grown = mac
+        grown.diskBytes = Int64(gb) << 30
+        update(grown)
+        HengeLog.log("machines", "grew \(mac.name)'s disk to \(gb) GB (\(note))")
+        return grown
+    }
+
     func delete(_ id: UUID) {
         try? FileManager.default.removeItem(at: Self.directory(for: id))
         all.removeAll { $0.id == id }
