@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject private var jit = JITCoordinator.shared
     @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = false
+    @AppStorage(JITDeviceAddress.key) private var jitDeviceAddress = ""
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
@@ -46,10 +47,26 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                     Button("Set up JIT") { jit.showSetup = true }
                     Toggle("Turn on JIT when Henge opens", isOn: $jitAtLaunch)
-                    if jitAtLaunch {
+                    if jitAtLaunch && JITDeviceAddress.custom == nil {
                         Text("Henge connects LocalDevVPN first when it is off, and comes back.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
+                    LabeledContent("Device address") {
+                        TextField("10.7.0.1 (LocalDevVPN)", text: $jitDeviceAddress)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numbersAndPunctuation)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .onChange(of: jitDeviceAddress) { _ in jit.addressChanged() }
+                    }
+                    let address = jitDeviceAddress.trimmingCharacters(in: .whitespaces)
+                    Text(address.isEmpty
+                         ? "Built-in StikJIT reaches this device through LocalDevVPN. Enter an IP address to reach it another way, without LocalDevVPN."
+                         : JITDeviceAddress.isValid(address)
+                            ? "Built-in StikJIT reaches this device at \(address), without LocalDevVPN. Clear it to use LocalDevVPN again."
+                            : "Enter an IPv4 or IPv6 address, such as 127.0.0.1.")
+                        .font(.footnote)
+                        .foregroundStyle(address.isEmpty || JITDeviceAddress.isValid(address) ? Color.secondary : Color.red)
                     LabeledContent("Code region", value: "\(JITBootstrap.jitBytes >> 20) MB, claimed once per launch")
                     LabeledContent("Trusted Execution Monitor", value: TXMDetection.fromDeviceTree == nil
                                    ? (JITBootstrap.deviceEnforcesTXM ? "Expected for this model" : "Not expected for this model")
