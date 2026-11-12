@@ -19,7 +19,11 @@ import UIKit
 ///   cpus N             the CPUs setting (1-6) for the next Mac started; it stays, so set it back afterwards
 ///   env NAME [VALUE]   set (or unset) an engine environment setting for the next Mac started
 ///   balloon MB         ask the Mac for that much of its memory back (HV_BALLOON set), log what it gave
-///   snap [NAME]        the Mac's screen (1920x1080) into Documents/NAME.jpg (snap.jpg)
+///   snap [NAME]        the Mac's screen, at the size macOS has now, into Documents/NAME.jpg (snap.jpg)
+///   screen W H         act as if the device's space for the Mac were W x H points (a rotation, a fold or unfold),
+///                      so a Mac that follows its space is asked for that size; "screen off" goes back to the real one
+///   check [NAME]       what the device's panel shows: the Mac's screen where the layout puts it, cut by the panel's
+///                      rounded corners, into Documents/NAME.png (check.png), and the sizes and corners into the log
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
 ///   exit               quit Henge
@@ -114,12 +118,29 @@ enum Autopilot {
         case "snap": // the Mac's screen, full size, into Documents/snap.jpg (or NAME.jpg): "snap", "snap safari"
             let name = arg.isEmpty ? "snap" : arg
             let url = docs.appendingPathComponent("\(name).jpg")
-            if let image = MacPreview.capture(width: 1920, height: 1080),
+            let size = macSize()
+            if let image = MacPreview.capture(width: size.width, height: size.height),
                let data = UIImage(cgImage: image).jpegData(compressionQuality: 0.9), (try? data.write(to: url, options: .atomic)) != nil {
-                HengeLog.log("autopilot", "snap \(url.lastPathComponent), \(data.count / 1024) KB")
+                HengeLog.log("autopilot", "snap \(url.lastPathComponent) \(size.width)x\(size.height), \(data.count / 1024) KB")
             } else {
                 HengeLog.log("autopilot", "snap: no screen to read")
             }
+        case "screen": // "screen 951 669", "screen off"
+            guard let display = DisplayRouter.current else { HengeLog.log("autopilot", "screen: no Mac on screen"); break }
+            let wh = arg.split(separator: " ").compactMap { Double($0) }
+            if arg == "off" {
+                display.simulated = nil
+                HengeLog.log("autopilot", "screen: the device's own space again")
+            } else if wh.count == 2 {
+                let scale = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen.scale }.first ?? 3
+                let size = DisplayRouter.Size.fitting(CGSize(width: wh[0], height: wh[1]), scale: scale, retina: display.isRetina)
+                display.simulated = size
+                HengeLog.log("autopilot", "screen \(wh[0])x\(wh[1]) pt: asking for \(size.map { "\($0.width)x\($0.height)" } ?? "nothing")")
+            } else {
+                HengeLog.log("autopilot", "screen wants W H (points) or off")
+            }
+        case "check":
+            check(arg.isEmpty ? "check" : arg)
         case "cpus": // "cpus 2": the CPU count the next Mac started gets (the CPUs setting, kept: put it back after a test)
             if let n = Int(arg), (1...6).contains(n) {
                 UserDefaults.standard.set(n, forKey: "henge.cpus")
@@ -168,6 +189,50 @@ enum Autopilot {
             exit(0)
         default:
             HengeLog.log("autopilot", "unknown command")
+        }
+    }
+
+    /// The Mac's screen as macOS has it now, or 1920 x 1080 before it says.
+    @MainActor private static func macSize() -> DisplayRouter.Size {
+        var w: UInt32 = 0, h: UInt32 = 0
+        if henge_vm_display_size(&w, &h) == 0, w > 0, h > 0 { return DisplayRouter.Size(width: Int(w), height: Int(h)) }
+        return DisplayRouter.current?.screen ?? DisplayRouter.Size(width: 1920, height: 1080)
+    }
+
+    /// The device's panel as a person sees it, less Henge's own controls: black, the Mac's screen in the rectangle
+    /// the layout gives it, everything outside the panel's rounded corners cut away. The log gets what to compare:
+    /// the mode against what was asked for, the picture's scale on each axis (equal unless it is stretched), and
+    /// how far into the Mac's screen each corner reaches, in the Mac's pixels.
+    @MainActor private static func check(_ name: String) {
+        guard let display = DisplayRouter.current else { HengeLog.log("autopilot", "check: no Mac on screen"); return }
+        let mac = macSize(), full = display.full, picture = display.picture
+        let scale = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen.scale }.first ?? 3
+        let radius = Device.displayCornerRadius
+        let asked = display.requested.map { "\($0.width)x\($0.height)" } ?? "none"
+        let sx = picture.width * scale / CGFloat(mac.width), sy = picture.height * scale / CGFloat(mac.height)
+        HengeLog.log("check", "mode \(mac.width)x\(mac.height), asked \(asked), device \(Int(full.width))x\(Int(full.height)) pt at \(Int(scale))x, picture \(Int(picture.minX)),\(Int(picture.minY)) \(Int(picture.width))x\(Int(picture.height)) pt")
+        HengeLog.log("check", String(format: "device px per Mac px: %.3f across, %.3f down%@", sx, sy, abs(sx - sy) > 0.01 ? " (STRETCHED)" : ""))
+        // The corner arc, in the Mac's pixels: how much of the Mac's screen it hides at the corners, at the
+        // middle of a 24 pt menu bar (macOS's own on a Mac without a notch, 2x on Retina).
+        let rMac = radius * scale / sx
+        let inset = max(0, min(picture.minX, picture.minY)) * scale / sx // picture inside the panel: the arc starts further out
+        let r = max(0, rMac - inset)
+        let barMiddle: CGFloat = display.isRetina ? 24 : 12
+        let hidden = r > barMiddle ? r - (r * r - (r - barMiddle) * (r - barMiddle)).squareRoot() : 0
+        HengeLog.log("check", String(format: "corner radius %.0f pt = %.0f Mac px; at the menu bar's middle (y %.0f) the first %.0f Mac px of each side are hidden; diagonal depth %.0f Mac px", radius, r, barMiddle, hidden, r * (1 - 1 / 2.0.squareRoot())))
+        guard let image = MacPreview.capture(width: mac.width, height: mac.height) else { HengeLog.log("check", "no screen to read"); return }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = true
+        let png = UIGraphicsImageRenderer(size: full, format: format).pngData { ctx in
+            UIColor.black.setFill()
+            ctx.fill(CGRect(origin: .zero, size: full))
+            UIBezierPath(roundedRect: CGRect(origin: .zero, size: full), cornerRadius: radius).addClip()
+            UIImage(cgImage: image).draw(in: picture)
+        }
+        let url = docs.appendingPathComponent("\(name).png")
+        if (try? png.write(to: url, options: .atomic)) != nil {
+            HengeLog.log("check", "\(url.lastPathComponent), \(png.count / 1024) KB")
         }
     }
 }

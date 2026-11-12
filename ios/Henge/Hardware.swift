@@ -77,6 +77,7 @@ enum Device {
 enum HardwareKeys {
     private static var held: Set<UInt8> = []
     private static var lastKey: CFTimeInterval = 0
+    private static var chordsLogged = 0
 
     /// With the on-screen keyboard's view holding the keyboard, iOS may also offer a hardware key as
     /// text, and again as it repeats. The Mac has the key already, and repeats it itself.
@@ -103,6 +104,10 @@ enum HardwareKeys {
                 continue
             }
             let usage = UInt8(raw)
+            if down, usage < 0xe0, held.contains(0xe3) || held.contains(0xe7), chordsLogged < 40 {
+                chordsLogged += 1 // which ⌘ shortcuts reach the Mac; one iOS keeps never shows here
+                HengeLog.log("input", "⌘ shortcut to the Mac: key 0x\(String(usage, radix: 16))")
+            }
             henge_vm_key_hid(usage, down ? 1 : 0)
             if usage < 0xe0 { lastKey = CACurrentMediaTime() }
             if down {
@@ -302,12 +307,23 @@ final class HardwareMouse {
             extra.pressedChangedHandler = { [weak self] _, _, pressed in self?.sideButton(UInt32(3 + i), pressed) }
         }
         input.scroll.valueChangedHandler = { [weak self] _, first, second in self?.scrolled(first, second) }
+        if !Device.isPad { MouseBluetoothProbe.shared.run() } // what an iPhone lets an app reach of it
         // Whether GameController delivers anything for this mouse: an iPhone announces a mouse it may never pass on.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak mouse] in
             guard let self, let mouse else { return }
             let scenes = UIApplication.shared.connectedScenes.map { "\($0.session.role.rawValue):\($0.activationState.rawValue)" }
             let moves = self.queue.sync { self.movesLogged }
-            HengeLog.log("input", "mouse 5 s on: current \(GCMouse.current === mouse), moves seen \(moves), left now \(mouse.mouseInput?.leftButton.isPressed ?? false), scenes \(scenes)")
+            let lock = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                .map { $0.pointerLockState.map { $0.isLocked ? "locked" : "unlocked" } ?? "no lock state" }
+            HengeLog.log("input", "mouse 5 s on: current \(GCMouse.current === mouse), moves seen \(moves), left now \(mouse.mouseInput?.leftButton.isPressed ?? false), scenes \(scenes), pointer lock \(lock)")
+        }
+        // Polled state, apart from the handlers: if this changes while no handler runs, delivery is the problem, not input.
+        for second in 1...20 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(second)) { [weak mouse] in
+                guard let input = mouse?.mouseInput else { return }
+                let pressed = [input.leftButton, input.rightButton, input.middleButton].compactMap { $0 }.map { $0.isPressed ? "1" : "0" }.joined()
+                HengeLog.log("input", "mouse poll \(second) s: buttons \(pressed), scroll \(input.scroll.xAxis.value), \(input.scroll.yAxis.value)")
+            }
         }
     }
 
