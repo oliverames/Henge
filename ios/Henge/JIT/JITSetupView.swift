@@ -253,7 +253,29 @@ struct JITSetupFlow: View {
 
     // MARK: LocalDevVPN
 
-    private var connect: some View {
+    @ViewBuilder private var connect: some View {
+        if let address = JITDeviceAddress.custom {
+            connectByAddress(address)
+        } else {
+            connectLocalDevVPN
+        }
+    }
+
+    /// A device address is set in Settings, so the helper does not go through LocalDevVPN.
+    private func connectByAddress(_ address: String) -> some View {
+        page(symbol: "network", title: "Device address",
+             subtitle: "Henge's helper reaches this \(device)'s debugging service at \(address), set in Settings › JIT, "
+                     + "so LocalDevVPN is not needed.") {
+            Label("To go through LocalDevVPN again, clear the device address in Settings › JIT.", systemImage: "info.circle")
+                .font(.system(size: 13)).foregroundStyle(Theme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        } actions: {
+            Button("Continue") { path.append(.enable) }
+                .buttonStyle(PrimaryButtonStyle())
+        }
+    }
+
+    private var connectLocalDevVPN: some View {
         page(symbol: "network.badge.shield.half.filled", title: "Connect LocalDevVPN",
              subtitle: "Henge's helper reaches this \(device)'s debugging service through a local VPN. "
                      + "Nothing leaves your \(device).") {
@@ -281,7 +303,8 @@ struct JITSetupFlow: View {
              subtitle: "The first check downloads and mounts Apple's Developer Disk Image, "
                      + "which can take a minute.") {
             VStack(alignment: .leading, spacing: 14) {
-                point(1, "Tap **Check setup**. Henge checks LocalDevVPN and prepares the Developer Disk Image.",
+                point(1, "Tap **Check setup**. Henge checks \(JITDeviceAddress.custom ?? "LocalDevVPN") and prepares "
+                       + "the Developer Disk Image.",
                       done: jit.prepared || attached)
                 point(2, "Tap **Enable JIT**. Henge's helper attaches and a Mac can start.", done: attached)
             }

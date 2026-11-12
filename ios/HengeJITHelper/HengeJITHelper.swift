@@ -17,6 +17,9 @@ private enum HengeJITWork {
             .appendingPathComponent("StikJIT", isDirectory: true)
         let paths = DDIPaths.default(in: root)
         var configuration = StikJIT.Configuration.default
+        if let address = request.deviceAddress, !address.isEmpty {
+            configuration.deviceAddress = address
+        }
         /// Appended to the reply so Henge's log shows how the port was chosen.
         var portNote = ""
         var needsScan = false
@@ -61,8 +64,10 @@ private enum HengeJITWork {
                     progress: { NSLog("[HengeJIT] prepare: %@", String(describing: $0)) })
                 switch readiness {
                 case .ready(let security):
-                    return .init(success: true,
-                                 message: "LocalDevVPN is reachable and the Developer Disk Image is ready." + portNote,
+                    let reached = request.deviceAddress.map { "This device's debugging service answered at \($0)" }
+                    ?? "LocalDevVPN is reachable"
+                return .init(success: true,
+                                 message: reached + " and the Developer Disk Image is ready." + portNote,
                                  txmPresent: security.isTXMPresent)
                 case .unreachable(let reason), .preparationFailed(let reason):
                     return .init(success: false, message: reason + portNote, txmPresent: StikJIT.isTXMPresent)

@@ -53,6 +53,17 @@ struct JITAdviceTests {
             precondition(JITNetworkAdvice.advice(forHelperMessage: "Developer Disk Image is not mounted", situation: situation) == nil)
         }
 
+        // Advice: with a device address set instead of LocalDevVPN, an unreachable device points at that address,
+        // never at LocalDevVPN or cellular routing.
+        for situation in [NetworkSituation.wifi, .cellularOnly] {
+            let byAddress = JITNetworkAdvice.advice(forHelperMessage: timeout, situation: situation, deviceAddress: "127.0.0.1")
+            precondition(byAddress?.message.contains("127.0.0.1") == true)
+            precondition(byAddress?.message.contains("Cellular Data") == false)
+            precondition(byAddress?.actions == [])
+            let refused = JITNetworkAdvice.advice(forHelperMessage: reset, situation: situation, deviceAddress: "127.0.0.1")
+            precondition(refused?.actions == [.pairAgain])
+        }
+
         // Retry: the first connection over cellular is the one iOS misroutes, so try again shortly.
         guard case .retry(let wait) = JITRetryPolicy.decision(situation: .cellularOnly, problem: .unreachable, attempt: 1) else {
             preconditionFailure("an unreachable first attempt on cellular should be retried")

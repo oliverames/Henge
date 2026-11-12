@@ -64,8 +64,17 @@ enum JITConnectionProblem: Equatable {
 }
 
 enum JITNetworkAdvice {
-    static func advice(forHelperMessage helperMessage: String, situation: NetworkSituation) -> JITAdvice? {
+    /// `deviceAddress` is the address set in Settings in place of LocalDevVPN's; nil when LocalDevVPN is used.
+    static func advice(forHelperMessage helperMessage: String, situation: NetworkSituation,
+                       deviceAddress: String? = nil) -> JITAdvice? {
         guard let problem = JITConnectionProblem(helperMessage: helperMessage) else { return nil }
+        if let deviceAddress {
+            return problem == .pairing
+                ? JITAdvice(message: "This device closed the connection at \(deviceAddress), which usually means it no longer "
+                                   + "accepts Henge's pairing. Pair again.", actions: [.pairAgain])
+                : JITAdvice(message: "Nothing answered at \(deviceAddress). Check the device address in Settings › JIT, "
+                                   + "or clear it to go through LocalDevVPN.", actions: [])
+        }
         if problem == .pairing {
             return JITAdvice(
                 message: "This device closed the connection, which usually means it no longer accepts "

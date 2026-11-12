@@ -76,6 +76,26 @@ enum JITPairingFileStore {
     }
 }
 
+/// Where the built-in helper reaches this device's RemotePairing service. Empty, the default, means LocalDevVPN's
+/// 10.7.0.1. Another address skips LocalDevVPN: this device's own address on a network that reaches its RemotePairing
+/// service, or a loopback address. StikJIT takes an IP address, not a name.
+enum JITDeviceAddress {
+    static let key = "henge.jit.deviceAddress"
+
+    /// The address in use, or nil for LocalDevVPN's. Text that is not an IP address is not used (Settings says so).
+    static var custom: String? {
+        let value = (UserDefaults.standard.string(forKey: key) ?? "").trimmingCharacters(in: .whitespaces)
+        return isValid(value) ? value : nil
+    }
+
+    /// Whether `text` is an IPv4 or IPv6 address, which is all StikJIT accepts.
+    static func isValid(_ text: String) -> Bool {
+        var v4 = in_addr()
+        var v6 = in6_addr()
+        return inet_pton(AF_INET, text, &v4) == 1 || inet_pton(AF_INET6, text, &v6) == 1
+    }
+}
+
 @MainActor
 final class JITCoordinator: ObservableObject {
     static let shared = JITCoordinator()
@@ -139,6 +159,14 @@ final class JITCoordinator: ObservableObject {
         }
     }
 
+    /// The device address changed in Settings: the last setup check was for the old one.
+    func addressChanged() {
+        prepared = false
+        error = nil
+        advice = nil
+        connectionProblem = nil
+    }
+
     func refreshPairingStatus() {
         pairingSource = JITPairingFileStore.source
     }
@@ -185,9 +213,9 @@ final class JITCoordinator: ObservableObject {
             log("JIT at launch is on, but built-in StikJIT is not available or not paired; skipped")
             return
         }
-        // The helper reaches this device through LocalDevVPN. When it is not connected, connect it first: LocalDevVPN
-        // connects and comes back (henge://), and the return to the foreground goes on above.
-        if LocalDevVPN.isInstalled, !LocalDevVPN.isConnected {
+        // The helper reaches this device through LocalDevVPN, unless a device address is set. When it is not connected,
+        // connect it first: LocalDevVPN connects and comes back (henge://), and the return to the foreground goes on above.
+        if JITDeviceAddress.custom == nil, LocalDevVPN.isInstalled, !LocalDevVPN.isConnected {
             log("JIT at launch: LocalDevVPN is not connected; opening it to connect")
             awaitingVPN = true
             LocalDevVPN.open()
@@ -326,9 +354,12 @@ final class JITCoordinator: ObservableObject {
         error = nil
         connectionProblem = nil
         advice = nil
-        if attempt == 1 { status = "Checking LocalDevVPN and the Developer Disk Image…" }
+        if attempt == 1 {
+            status = "Checking " + (JITDeviceAddress.custom.map { "\($0)" } ?? "LocalDevVPN") + " and the Developer Disk Image…"
+        }
         RemotePairingPortDiscovery.resolve { port in
-            HengeBuiltInJIT.send(.prepare(pairingData: pairing, rsdPort: port)) { [weak self] result in
+            HengeBuiltInJIT.send(.prepare(pairingData: pairing, rsdPort: port,
+                                          deviceAddress: JITDeviceAddress.custom)) { [weak self] result in
                 guard let self else { return }
                 switch result {
                 case .success(let response):
@@ -388,12 +419,15 @@ final class JITCoordinator: ObservableObject {
 
         RemotePairingPortDiscovery.resolve { port in
             HengeBuiltInJIT.send(
-                .enable(targetPID: getpid(), pairingData: pairing, scriptBase64: script, rsdPort: port),
+                .enable(targetPID: getpid(), pairingData: pairing, scriptBase64: script, rsdPort: port,
+                        deviceAddress: JITDeviceAddress.custom),
                 started: { [weak self] in
                     if attempt == 1 { self?.status = "Waiting for the helper to attach…" }
                     readiness = Self.waitForDebugger { attached in
                         finish(attached ? nil : "The helper did not attach within 90 seconds. "
-                                              + "Check that LocalDevVPN is connected, then try again.")
+                                              + (JITDeviceAddress.custom.map { "Check that \($0) reaches this device, " }
+                                                 ?? "Check that LocalDevVPN is connected, ")
+                                              + "then try again.")
                     }
                 },
                 completion: { [weak self] result in
@@ -456,14 +490,17 @@ final class JITCoordinator: ObservableObject {
     /// explanation for the network in use (the helper's own message is already in the log).
     private func helperFailure(_ message: String) -> String {
         connectionProblem = JITConnectionProblem(helperMessage: message)
-        advice = JITNetworkAdvice.advice(forHelperMessage: message, situation: networkSituation)
+        advice = JITNetworkAdvice.advice(forHelperMessage: message, situation: networkSituation,
+                                         deviceAddress: JITDeviceAddress.custom)
         return advice?.message ?? message
     }
 
     /// When the policy says the failure is worth another try, say so, wait, and call `retry` with the next attempt number.
     /// Returns false when it gives up, and the caller shows the advice instead.
     private func retryIfAdvised(helperMessage: String, attempt: Int, retry: @escaping (Int) -> Void) -> Bool {
-        guard let problem = JITConnectionProblem(helperMessage: helperMessage),
+        // The retries are for iOS sending LocalDevVPN's traffic over cellular; another address has no such problem.
+        guard JITDeviceAddress.custom == nil,
+              let problem = JITConnectionProblem(helperMessage: helperMessage),
               case .retry(let wait) = JITRetryPolicy.decision(situation: networkSituation, problem: problem, attempt: attempt)
         else { return false }
         status = JITRetryPolicy.statusText(nextAttempt: attempt + 1)
