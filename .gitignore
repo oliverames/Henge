@@ -1,1 +1,3 @@
 build/
+# Local Mac backups (disk images, aux, pairing files). Never commit.
+/backups/
