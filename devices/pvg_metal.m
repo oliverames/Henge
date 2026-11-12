@@ -917,9 +917,29 @@ static void sync_iosurface(HvObject *s) {
 
 /* A surface (IOSurface in the guest): a texture over its guest pages, so the
    guest's CPU and the GPU see the same pixels, as they do through a real one.
-   {mapping id, tag, size, ref, description}. Its descriptor: page list at +0
-   (physical >> 12, bit 0 present, one per 16 KB), first-page offset +0x60,
-   allocation +0x18, bytes per row +0x30. */
+   {mapping id, tag, size, ref, description}. Its descriptor: page list at +0,
+   first-page offset +0x60, allocation +0x18, bytes per row +0x30. The list is a
+   page table, as ParavirtualizedGraphics reads it (-[PGIOSurfaceHostDevice
+   mapSurface:]): each 32-bit entry is a 16 KB page number << 2 with two flag bits,
+   01 for a page and 11 for a table page. Up to 4096 pages the list page holds the
+   surface's pages; past that it holds up to 4096 table pages of 4096 pages each. */
+/* Entry i of a surface's page table, or 0 for a missing or malformed one. */
+static uint32_t surface_page_entry(HvPvgLite *lite, uint32_t list, uint64_t n, uint64_t i) {
+    const uint64_t per = 0x4000 / 4;
+    if (!(list & 1) || n > per * per) return 0;
+    const uint32_t *root = hv_pvg_lite_phys(lite, (uint64_t)(list >> 2) << 14, 0x4000);
+    if (!root) return 0;
+    uint32_t e;
+    if (n <= per) e = root[i];
+    else {
+        uint32_t table = root[i / per];
+        if ((table & 3) != 3) return 0;
+        const uint32_t *t = hv_pvg_lite_phys(lite, (uint64_t)(table >> 2) << 14, 0x4000);
+        if (!t) return 0;
+        e = t[i % per];
+    }
+    return (e & 3) == 1 ? e : 0;
+}
 /* A guest surface (IOSurface) from its description: its pages in one host buffer (or a real IOSurface for planes). */
 - (HvObject *)newSurface:(uint64_t)mapping {
     NSNumber *key = @(mapping);
@@ -961,15 +981,16 @@ static void sync_iosurface(HvObject *s) {
     surface->surface_w = (uint32_t)sw, surface->surface_h = (uint32_t)sh;
     uint64_t n = surface->length >> 14;
     vm_address_t base = 0;
-    const uint32_t *pages = (list & 1) ? hv_pvg_lite_phys(lite, (uint64_t)(list & ~1u) << 12, n * 4) : NULL;
-    if (!pages || vm_allocate(mach_task_self(), &base, surface->length, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
+    uint32_t page0 = n ? surface_page_entry(lite, list, n, 0) : 0;
+    if (!page0 || vm_allocate(mach_task_self(), &base, surface->length, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
         [self complain:[NSString stringWithFormat:@"surface %llu has no pages", mapping]];
         return nil;
     }
     surface->mapped = (uint8_t *)base;
     for (uint64_t i = 0; i < n; i++) {
-        if (!(pages[i] & 1)) continue;
-        uint8_t *src = hv_pvg_lite_phys(lite, (uint64_t)(pages[i] & ~1u) << 12, 0x4000);
+        uint32_t page = surface_page_entry(lite, list, n, i);
+        if (!page) continue;
+        uint8_t *src = hv_pvg_lite_phys(lite, (uint64_t)(page >> 2) << 14, 0x4000);
         if (!src) continue;
         vm_address_t to = base + (i << 14);
         vm_prot_t cur, max;
@@ -987,7 +1008,7 @@ static void sync_iosurface(HvObject *s) {
            the hashes it shares: a video decoder's process writes frames with the CPU and never uses the GPU, so
            nothing had copied them, and the first process to draw with one (the wallpaper's lock-screen image
            during Setup) read an empty frame: solid green. */
-        NSString *pk = [NSString stringWithFormat:@"%x/%08x/%llux%llu/%llu", pages[0] & ~1u, surface->fourcc,
+        NSString *pk = [NSString stringWithFormat:@"%x/%08x/%llux%llu/%llu", page0 & ~3u, surface->fourcc,
                         (unsigned long long)sw, (unsigned long long)sh, (unsigned long long)alloc];
         id shared = planar[pk];
         if (shared && made) {
