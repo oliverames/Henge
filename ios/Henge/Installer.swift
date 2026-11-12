@@ -90,17 +90,39 @@ final class Installer: NSObject, ObservableObject {
         return standard
     }
 
+    /// Whether this file is the image of `r`: its BuildManifest.plist names that build (the file's name says nothing).
     nonisolated static func isMatchingIPSW(_ file: URL, release r: MacOSRelease) -> Bool {
-        let name = file.lastPathComponent.lowercased()
-        for other in MacOSRelease.all where other.id != r.id {
-            if name.contains(other.id.lowercased()) { return false }
+        ipswInfo(file)?.build == r.id
+    }
+
+    /// What a picked file is: the macOS it holds, or why Henge cannot install it. nil when Henge offers that build.
+    nonisolated static func ipswProblem(_ file: URL) -> String? {
+        guard let info = ipswInfo(file) else { return "This file is not a macOS restore image." }
+        if MacOSRelease.all.contains(where: { $0.id == info.build }) { return nil }
+        return "This restore image is macOS \(info.version) (build \(info.build)), which Henge doesn't offer yet."
+    }
+
+    struct IPSWInfo { let version: String; let build: String }
+
+    /// The version and build from the IPSW's BuildManifest.plist, read once per file (reading opens a 15 GB zip).
+    nonisolated static func ipswInfo(_ file: URL) -> IPSWInfo? { ipswInfoCache.info(file) }
+    private nonisolated static let ipswInfoCache = IPSWInfoCache()
+
+    private final class IPSWInfoCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var known: [String: IPSWInfo?] = [:]
+
+        func info(_ file: URL) -> IPSWInfo? {
+            lock.lock()
+            defer { lock.unlock() }
+            if let seen = known[file.path] { return seen }
+            var version = [CChar](repeating: 0, count: 64)
+            var build = [CChar](repeating: 0, count: 64)
+            let found = hv_ipsw_info(file.path, &version, version.count, &build, build.count) == 0
+                ? IPSWInfo(version: String(cString: version), build: String(cString: build)) : nil
+            known[file.path] = .some(found)
+            return found
         }
-        if name.contains(r.id.lowercased()) { return true }
-        if r.id == "24G90" && (name.contains("15.6") || name.contains("sequoia")) { return true }
-        if r.id == "23G93" && (name.contains("14.6") || name.contains("sonoma")) { return true }
-        if r.id == "22G120" && (name.contains("13.6") || name.contains("ventura")) { return true }
-        if r.id == "25G83" && (name.contains("26.6") || name.contains("tahoe")) { return true }
-        return r == MacOSRelease.recommended
     }
 
     /// The size of the image on this iPhone, if a whole one is there (the listed sizes are rounded).

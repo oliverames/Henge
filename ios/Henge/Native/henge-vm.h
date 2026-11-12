@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ipsw_info.h"
+
 /* Builds the machine from imported files, on the JIT region the app holds
    (henge_ios_jit_prewarm), and starts it. 0, or -1 with a reason in err. */
 int henge_vm_boot(const char *rom, const char *disk, const char *aux, uint64_t ecid, uint64_t seed, uint64_t ram_mb,

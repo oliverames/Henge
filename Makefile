@@ -12,7 +12,7 @@ ENGINE = $(CORE) $(HOST)
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
-        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown
+        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown $(B)/test_ipsw_info
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
 
@@ -109,6 +109,9 @@ $(B)/hvsparse: tools/hvsparse_main.c host/hvsparse.c host/hvsparse.h | $(B)
 # Block-level tests: test_X.c plus X_programs.S, run natively and through the JIT.
 $(B)/test_devices: tests/test_devices.c tests/devices_programs.S tests/harness.S tests/harness.h $(ENGINE) $(DEV)
 	$(CC) $(CFLAGS) -Itests tests/test_devices.c tests/devices_programs.S tests/harness.S $(ENGINE) $(DEV) $(METAL_LIBS) -o $@
+# Reading a restore image's version and build (host/ipsw_info.c) with Homebrew's libzip and libplist.
+$(B)/test_ipsw_info: tests/test_ipsw_info.c host/ipsw_info.c host/ipsw_info.h | $(B)
+	$(CC) $(CFLAGS) -Ihost $(shell pkg-config --cflags libzip libplist-2.0) tests/test_ipsw_info.c host/ipsw_info.c $(shell pkg-config --libs libzip libplist-2.0) -o $@
 $(B)/test_%: tests/test_%.c tests/%_programs.S tests/harness.S tests/harness.h $(ENGINE)
 	$(CC) $(CFLAGS) -Itests tests/test_$*.c tests/$*_programs.S tests/harness.S $(ENGINE) -o $@
 
@@ -188,7 +191,7 @@ test-tl-glue: $(B)/test_tl_glue $(B)/tl-exit3
 .PHONY: test-tl-glue
 
 # The restore stack, built from the same sources and with the same stand-ins as iOS.
-$(B)/mac-restore/libhengerestore.a: tools/build_ios_restore.sh host/libusb_shim.c host/install.c host/curl_shim.m $(wildcard third_party/*/src/*.c) $(wildcard third_party/libirecovery/src/*.c)
+$(B)/mac-restore/libhengerestore.a: tools/build_ios_restore.sh host/libusb_shim.c host/install.c host/ipsw_info.c host/curl_shim.m $(wildcard third_party/*/src/*.c) $(wildcard third_party/libirecovery/src/*.c)
 	nice -n 10 tools/build_ios_restore.sh mac
 
 # The installer: libirecovery, usbmuxd and idevicerestore (third_party, vendored

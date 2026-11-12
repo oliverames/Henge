@@ -19,6 +19,7 @@ struct InstallView: View {
     @State private var confirmDeleteDownload: MacOSRelease?
     @State private var pickingFolder = false
     @State private var pickingIPSW = false
+    @State private var ipswProblem: String?
     @AppStorage("henge.cpus") private var cpus = 4
 
     var body: some View {
@@ -51,11 +52,11 @@ struct InstallView: View {
             .fileImporter(isPresented: $pickingIPSW, allowedContentTypes: [UTType(filenameExtension: "ipsw") ?? .data]) { result in
                 if case let .success(url) = result {
                     if storage.setCustomIPSW(url) {
-                        for r in MacOSRelease.all {
-                            if Installer.isMatchingIPSW(url, release: r) {
-                                release = r
-                                break
-                            }
+                        ipswProblem = Installer.ipswProblem(url)
+                        if ipswProblem != nil {
+                            storage.clearCustomIPSW()
+                        } else if let r = MacOSRelease.all.first(where: { Installer.isMatchingIPSW(url, release: $0) }) {
+                            release = r
                         }
                         refresh += 1
                     }
@@ -196,6 +197,14 @@ struct InstallView: View {
                 }
                 .padding(.horizontal, 17)
                 .padding(.vertical, 10)
+            }
+            if let problem = ipswProblem {
+                Rectangle().fill(Desk.hairline).frame(height: 0.5)
+                Text(problem)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Desk.bad)
+                    .padding(.horizontal, 17)
+                    .padding(.vertical, 10)
             }
         }
         .deskCard()
