@@ -126,6 +126,42 @@ static const uint8_t tp_config_desc[34] = {
 
 static const char *const tp_strings[] = {NULL, "Apple Inc.", "Magic Trackpad 2", "HengeVM"};
 
+/* Port 3: a five-button wheel mouse, for a mouse or trackpad held to the host. The report has
+   no ID: buttons 1-5 and three pad bits, X and Y as 16-bit relative values (a fast flick at a
+   high host rate overflows 8 bits), the wheel, then AC Pan for sideways scrolling. Not a boot
+   mouse: macOS reads the descriptor, and a 16-bit X does not fit the boot format. */
+
+static const uint8_t ms_report_desc[] = {
+    0x05, 0x01, 0x09, 0x02, 0xa1, 0x01,       /* usage page (generic desktop), usage (mouse), collection (application) */
+    0x09, 0x01, 0xa1, 0x00,                   /* usage (pointer), collection (physical) */
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, /* buttons 1-5 */
+    0x95, 0x05, 0x75, 0x01, 0x81, 0x02,
+    0x95, 0x01, 0x75, 0x03, 0x81, 0x01,       /* three bits of padding */
+    0x05, 0x01, 0x09, 0x30, 0x09, 0x31,       /* X, Y */
+    0x16, 0x01, 0x80, 0x26, 0xff, 0x7f,       /* -32767..32767 */
+    0x75, 0x10, 0x95, 0x02, 0x81, 0x06,       /* data, variable, relative */
+    0x09, 0x38, 0x15, 0x81, 0x25, 0x7f,       /* wheel, -127..127 */
+    0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+    0x05, 0x0c, 0x0a, 0x38, 0x02,             /* consumer page, AC Pan */
+    0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+    0xc0, 0xc0,
+};
+
+static const uint8_t ms_device_desc[18] = {
+    18, 1, 0x00, 0x02, 0, 0, 0, 64, /* USB 2.0, class per interface, EP0 64 bytes */
+    0x09, 0x12, 0x01, 0x00,         /* vendor 0x1209 (pid.codes), product 0x0001 (its test ID) */
+    0x00, 0x01, 1, 2, 3, 1,         /* bcdDevice 1.00, strings 1-3, one configuration */
+};
+
+static const uint8_t ms_config_desc[34] = {
+    9, 2, 34, 0, 1, 1, 0, 0xa0, 50,           /* one interface, remote wakeup, 100 mA */
+    9, 4, 0, 0, 1, 3, 0, 0, 0,                /* interface 0: HID, no boot protocol */
+    9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof ms_report_desc, 0, /* HID 1.11, one report descriptor */
+    7, 5, 0x81, 3, 8, 0, 1,                   /* EP1 IN, interrupt, 8 bytes, every 1 ms */
+};
+
+static const char *const ms_strings[] = {NULL, "HengeVM", "HengeVM USB Mouse", "1"};
+
 struct HvXhciDev {
     const char *const *strings;
     const uint8_t *device_desc;
@@ -136,6 +172,7 @@ struct HvXhciDev {
 static const struct HvXhciDev devs[HV_XHCI_DEVICES] = {
     {kbd_strings, kbd_device_desc, kbd_config_desc, kbd_report_desc, sizeof kbd_report_desc},
     {tp_strings, tp_device_desc, tp_config_desc, tp_report_desc, sizeof tp_report_desc},
+    {ms_strings, ms_device_desc, ms_config_desc, ms_report_desc, sizeof ms_report_desc},
 };
 
 static int xlog(void) {
@@ -373,7 +410,13 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
         src = tmp, len = 1;
     } else if (type == 0xa1 && req == 1) { /* GET_REPORT: wValue is (type << 8) | report ID */
         if (x->slots[slot].dev == 0) src = x->state, len = 8;
-        else {
+        else if (x->slots[slot].dev == 2) { /* the buttons held, and no motion */
+            memset(tmp, 0, HV_MS_REPORT_LEN);
+            pthread_mutex_lock(&x->mu);
+            tmp[0] = x->ms_buttons;
+            pthread_mutex_unlock(&x->mu);
+            src = tmp, len = HV_MS_REPORT_LEN;
+        } else {
             int rtype = value >> 8, rid = value & 0xff;
             if (rtype == 3) { /* feature: the sensor-configuration registers */
                 if (rid == 0x01) { /* the header for the register just selected */
@@ -505,6 +548,18 @@ static void run_ep_in(HvXhci *x, int slot) {
             wr(x, buf, x->reports[x->rhead % HV_XHCI_REPORTS], n);
             x->rhead++;
             x->delivered++;
+            transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
+        }
+    } else if (s->dev == 2) {
+        while (x->ms_rhead != x->ms_rtail && ring_peek(x, r, trb, &at)) {
+            int type = (trb[3] >> 10) & 0x3f;
+            ring_advance(r);
+            if (type != TRB_NORMAL) continue;
+            uint64_t buf = (uint64_t)trb[1] << 32 | trb[0];
+            uint32_t want = trb[2] & 0x1ffff;
+            uint32_t n = want < HV_MS_REPORT_LEN ? want : HV_MS_REPORT_LEN;
+            wr(x, buf, x->ms_reports[x->ms_rhead % HV_MS_REPORTS], n);
+            x->ms_rhead++;
             transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
         }
     } else {
@@ -701,11 +756,16 @@ static void run_commands(HvXhci *x) {
 /* ---- ports ---- */
 
 /* Port 1 is the full-speed keyboard; port 2 is the high-speed trackpad, as the real
-   Magic Trackpad 2 is. */
+   Magic Trackpad 2 is; port 3 is the full-speed mouse. */
+static uint32_t port_attached(const HvXhci *x, int p) {
+    if (p == 2 && x->ms_unplugged) return PORT_PP; /* powered, nothing in it */
+    return PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p == 1 ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
+}
+
 static void port_connect(HvXhci *x) {
     for (int p = 0; p < HV_XHCI_PORTS; p++) {
-        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
-        port_event(x, p);
+        x->portsc[p] = port_attached(x, p);
+        if (x->portsc[p] & PORT_CCS) port_event(x, p);
     }
 }
 
@@ -760,8 +820,9 @@ static void reset(HvXhci *x) {
     x->tp_db = 0;
     x->tp_multi_logs = 0;
     x->tp_f1_len = 0;
-    for (int p = 0; p < HV_XHCI_PORTS; p++)
-        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
+    x->ms_rhead = x->ms_rtail = 0;
+    x->ms_buttons = 0;
+    for (int p = 0; p < HV_XHCI_PORTS; p++) x->portsc[p] = port_attached(x, p);
     update_irq(x);
 }
 
@@ -1112,6 +1173,84 @@ void hv_xhci_touch_button(HvXhci *x, int down) {
     hv_machine_wake(x->m);
 }
 
+/* ---- the mouse's reports ---- */
+
+static void ms_put16(uint8_t *p, int v) {
+    p[0] = (uint8_t)(v & 0xff);
+    p[1] = (uint8_t)((v >> 8) & 0xff);
+}
+
+static int ms_get16(const uint8_t *p) { return (int16_t)(p[0] | p[1] << 8); }
+
+static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+/* Under x->mu. A move or scroll joins the newest waiting report when that one has the same
+   buttons and room for it, so a busy guest gets one report with the whole motion instead of
+   a backlog it plays out late. */
+static void ms_queue(HvXhci *x, int dx, int dy, int wheel, int pan) {
+    for (;;) {
+        int cx = clamp(dx, -32767, 32767), cy = clamp(dy, -32767, 32767);
+        int cw = clamp(wheel, -127, 127), cp = clamp(pan, -127, 127);
+        if (x->ms_rtail != x->ms_rhead) {
+            uint8_t *last = x->ms_reports[(x->ms_rtail - 1) % HV_MS_REPORTS];
+            int lx = ms_get16(last + 1), ly = ms_get16(last + 3);
+            int lw = (int8_t)last[5], lp = (int8_t)last[6];
+            if (last[0] == x->ms_buttons && lx + cx >= -32767 && lx + cx <= 32767 && ly + cy >= -32767 &&
+                ly + cy <= 32767 && lw + cw >= -127 && lw + cw <= 127 && lp + cp >= -127 && lp + cp <= 127) {
+                ms_put16(last + 1, lx + cx);
+                ms_put16(last + 3, ly + cy);
+                last[5] = (uint8_t)(int8_t)(lw + cw);
+                last[6] = (uint8_t)(int8_t)(lp + cp);
+                goto next;
+            }
+        }
+        if (x->ms_rtail - x->ms_rhead >= HV_MS_REPORTS) return; /* the guest stopped reading: drop it */
+        uint8_t *r = x->ms_reports[x->ms_rtail++ % HV_MS_REPORTS];
+        r[0] = x->ms_buttons;
+        ms_put16(r + 1, cx);
+        ms_put16(r + 3, cy);
+        r[5] = (uint8_t)(int8_t)cw;
+        r[6] = (uint8_t)(int8_t)cp;
+    next:
+        dx -= cx, dy -= cy, wheel -= cw, pan -= cp;
+        if (!dx && !dy && !wheel && !pan) return;
+    }
+}
+
+void hv_xhci_mouse(HvXhci *x, int dx, int dy, int wheel, int pan) {
+    if (!x || x->ms_unplugged || (!dx && !dy && !wheel && !pan)) return;
+    pthread_mutex_lock(&x->mu);
+    ms_queue(x, dx, dy, wheel, pan);
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+}
+
+void hv_xhci_mouse_buttons(HvXhci *x, unsigned buttons) {
+    if (!x || x->ms_unplugged) return;
+    pthread_mutex_lock(&x->mu);
+    if (x->ms_buttons != (buttons & 0x1f)) {
+        x->ms_buttons = (uint8_t)(buttons & 0x1f);
+        /* Always a report of its own: a press must not merge into the move before it. */
+        if (x->ms_rtail - x->ms_rhead < HV_MS_REPORTS) {
+            uint8_t *r = x->ms_reports[x->ms_rtail++ % HV_MS_REPORTS];
+            memset(r, 0, HV_MS_REPORT_LEN);
+            r[0] = x->ms_buttons;
+        }
+    }
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+}
+
+int hv_xhci_mouse_ready(const HvXhci *x) {
+    if (!x || x->ms_unplugged) return 0;
+    for (int slot = 1; slot <= HV_XHCI_SLOTS; slot++) {
+        if (x->slots[slot].dev != 2) continue;
+        for (int d = 2; d < HV_XHCI_EPS; d++)
+            if (x->slots[slot].ep_running[d]) return 1;
+    }
+    return 0;
+}
+
 void hv_xhci_poll(HvXhci *x) {
     if (!x) return;
     for (int slot = 1; slot <= HV_XHCI_SLOTS; slot++)
@@ -1130,6 +1269,8 @@ HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
     hv_pci_add_bar(&x->pci, 0, BAR_SIZE, 1);
     x->pci.config[0x60] = 0x30; /* SBRN: USB 3.0 controller */
     x->pci.config[0x61] = 0x20; /* FLADJ default */
+    const char *mouse = getenv("HV_USB_MOUSE");
+    x->ms_unplugged = mouse && !strcmp(mouse, "0");
     if (hv_pcie_attach(bus, &x->pci) < 0) {
         free(x);
         return NULL;
