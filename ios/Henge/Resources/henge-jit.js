@@ -15,18 +15,48 @@ const legacyCommands = {
 let tid, x0, x1, x16, pc;
 
 let detached = false;
+// Set when the script stops without detaching. It is thrown at the end so StikJIT
+// reports an error to the caller instead of a clean detach.
+let failure = null;
 let pid = get_pid();
 log(`pid = ${pid}`);
-let attachResponse = send_command(`vAttach;${pid.toString(16)}`);
+let attachResponse;
+try {
+    attachResponse = send_command(`vAttach;${pid.toString(16)}`);
+} catch (error) {
+    failure = `JIT_ATTACH_FAILED: debugserver connection closed while attaching: ${error}`;
+    log(failure);
+    detached = true;
+}
 log(`attach_response = ${attachResponse}`);
-    
+// vAttach must return a GDB stop packet. E96 (or any E.. reply) is
+// an attach refusal, not permission to send 'c'. Continuing after E96
+// caused "Socket(Custom { kind: NotConnected })" and a misleading success screen.
+if (!detached && (typeof attachResponse !== "string" || !/^T[0-9a-f]{2}/i.test(attachResponse))) {
+    failure = `JIT_ATTACH_FAILED: vAttach returned ${attachResponse}; JIT was NOT enabled. Check device pairing, Developer Disk Image, LocalDevVPN and debugger permissions, then retry.`;
+    log(failure);
+    detached = true;
+}
+
 let totalBreakpoints = 0;
 while (!detached) {
     totalBreakpoints++;
     log(`Handling breakpoint ${totalBreakpoints}`);
     
-    let brkResponse = send_command(`c`);
+    let brkResponse;
+    try {
+        brkResponse = send_command(`c`);
+    } catch (error) {
+        failure = `JIT_CONNECTION_LOST: debugserver disconnected: ${error}. JIT was NOT confirmed.`;
+        log(failure);
+        break;
+    }
     log(`brkResponse = ${brkResponse}`);
+    if (typeof brkResponse !== "string" || !/^T[0-9a-f]{2}/i.test(brkResponse)) {
+        failure = `JIT_CONNECTION_LOST: expected a stop packet but received ${brkResponse}; stopping instead of sending more commands.`;
+        log(failure);
+        break;
+    }
     
     let tmpMatch = /T[0-9a-f]+thread:(?<tid>[0-9a-f]+);/.exec(brkResponse);
     tid = tmpMatch ? tmpMatch.groups['tid'] : null;
@@ -35,8 +65,9 @@ while (!detached) {
     tmpMatch = /10:(?<reg>[0-9a-f]{16});/.exec(brkResponse);
     x16 = tmpMatch ? tmpMatch.groups['reg'] : null;
     if (!tid || !pc || !x16) {
-        log(`Failed to extract registers: tid=${tid}, pc=${pc}, x16=${x16}`);
-        continue;
+        failure = `Failed to extract registers: tid=${tid}, pc=${pc}, x16=${x16}; stopping to avoid an invalid debugger command.`;
+        log(failure);
+        break;
     }
     pc = littleEndianHexStringToNumber(pc);
     x16 = littleEndianHexStringToNumber(x16);
@@ -53,8 +84,9 @@ while (!detached) {
         tmpMatch = /01:(?<reg>[0-9a-f]{16});/.exec(brkResponse);
         x1 = tmpMatch ? tmpMatch.groups['reg'] : null;
         if (!x0 || !x1) {
-            log(`Failed to extract registers: x0=${x0}, x1=${x1}`);
-            continue;
+            failure = `Failed to extract registers: x0=${x0}, x1=${x1}; stopping to avoid an invalid debugger command.`;
+            log(failure);
+            break;
         }
         x0 = littleEndianHexStringToNumber(x0);
         x1 = littleEndianHexStringToNumber(x1);
@@ -71,6 +103,10 @@ while (!detached) {
         log(`Skipping breakpoint: brk immediate 0x${brkImmediate.toString(16)} was not handled by this script. You could add it by evaluating legacyCommands[0x${brkImmediate.toString(16)}] = yourFunction;`);
         continue;
     }
+}
+
+if (failure) {
+    throw new Error(failure);
 }
 
 function JIT26Detach() {
@@ -102,7 +138,7 @@ function JIT26NewBreakpoints(brkResponse) {
 
 // brk 0x69
 function JIT26HandleBrk0x69(brkResponse) {
-    let putX0Response = send_command(`P0=E0000069;thread:${tid};`);
+    let putX0Response = send_command(`P0=${numberToLittleEndianHexString(0x690000E0n)};thread:${tid};`);
     log(`putX0Response = ${putX0Response}`);
 }
 
@@ -151,25 +187,26 @@ function JIT26PrepareRegion(brkResponse) {
 
 // utilities
 function littleEndianHexStringToNumber(hexStr) {
+    if (!/^[0-9a-f]{16}$/i.test(hexStr)) {
+        throw new Error(`Invalid 64-bit register: ${hexStr}`);
+    }
     const bytes = [];
     for (let i = 0; i < hexStr.length; i += 2) {
-        bytes.push(parseInt(hexStr.substr(i, 2), 16));
+        bytes.push(parseInt(hexStr.slice(i, i + 2), 16));
     }
     let num = 0n;
-    for (let i = 4; i >= 0; i--) {
+    for (let i = 7; i >= 0; i--) {
         num = (num << 8n) | BigInt(bytes[i]);
     }
     return num;
 }
 
 function numberToLittleEndianHexString(num) {
+    num = BigInt.asUintN(64, num);
     const bytes = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
         bytes.push(Number(num & 0xFFn));
         num >>= 8n;
-    }
-    while (bytes.length < 8) {
-        bytes.push(0);
     }
     return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
 }
