@@ -367,6 +367,32 @@ static void test_virtio_blk(HvDisk *aux) {
     hv_virtio_blk_drain(board.aux_blk); /* requests complete on the worker thread */
     check("unknown request UNSUPP", ram(status)[0], 2);
     check("four requests used", used_idx(ring), 4);
+
+    /* Discard: DumpPanic clears the aux panic store with DKIOCUNMAP, and the
+       range must then read as zeros or the old panic is reported every boot. */
+    wr32(bar + 0x00, 0);
+    check("aux offers DISCARD and WRITE_ZEROES", rd32(bar + 0x04) & (3u << 13), 3u << 13);
+    check("max_discard_seg", rd32(bar + 0x2000 + 40), 32);
+    h[0] = 11;
+    h[2] = 0;
+    memcpy(ram(hdr), h, 16);
+    uint32_t range[4] = {9, 0, 1, 0}; /* sector 9 (low, high), 1 sector, no flags */
+    memcpy(ram(data), range, 16);
+    put_desc(ring, 8, hdr, 16, 1, 9);
+    put_desc(ring, 9, data, 16, 1, 10);
+    put_desc(ring, 10, status, 1, 2, 0);
+    offer(ring, 8);
+    wr16(bar + 0x3000, 0);
+    hv_virtio_blk_drain(board.aux_blk);
+    check("discard UNSUPP unless negotiated", ram(status)[0], 2);
+    board.aux_blk->vio.driver_features |= 3ull << 13;
+    offer(ring, 8);
+    wr16(bar + 0x3000, 0);
+    hv_virtio_blk_drain(board.aux_blk);
+    static const uint8_t zero[512];
+    hv_disk_read(aux, 9 * 512, back, 512);
+    check("discard status", ram(status)[0], 0);
+    check("discarded sector reads as zeros", memcmp(back, zero, 512), 0);
     rd8(bar + 0x1000);
 }
 
