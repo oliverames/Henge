@@ -302,6 +302,7 @@ final class HardwareMouse {
             extra.pressedChangedHandler = { [weak self] _, _, pressed in self?.sideButton(UInt32(3 + i), pressed) }
         }
         input.scroll.valueChangedHandler = { [weak self] _, first, second in self?.scrolled(first, second) }
+        if !Device.isPad { MouseBluetoothProbe.shared.run() } // what an iPhone lets an app reach of it
         // Whether GameController delivers anything for this mouse: an iPhone announces a mouse it may never pass on.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak mouse] in
             guard let self, let mouse else { return }
