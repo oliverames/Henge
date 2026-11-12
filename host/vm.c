@@ -127,8 +127,10 @@ const char *hv_vm_reason_name(int r) {
 
 /* Experiment (HV_ADT_PATCH="node/prop=value,..."): u32 values put into the guest's device tree while the kernel
    is young, before IOKit copies it into the registry. For the screen's shape: on a MacBook Pro, /product has
-   display-corner-radius and partially-occluded-display, which WindowServer builds the display's shape from. Only a
-   property already in the tree, with room for a u32, is changed: the tree is not grown.
+   display-corner-radius and partially-occluded-display, which WindowServer builds the display's shape from; a
+   virtual Mac's tree has display-corner-radius (0) on /chosen and no partially-occluded-display. A property already
+   in the tree, with room for a u32, is changed in place; one marked + (+product/partially-occluded-display=1) is
+   added if missing, into the slack left in the tree's last 16 KB page.
    Apple's device tree: node {u32 properties, u32 children, properties, children}; property {char name[32], u32
    length (top bit a flag), value padded to 4}. boot_args has deviceTreeP (a kernel address) at +0x60 and its length
    at +0x68. */
@@ -146,8 +148,9 @@ static int adt_skip(const uint8_t *dt, uint64_t len, uint64_t at, uint64_t *next
     return 0;
 }
 
-/* The property's value in the child of the root called `node`, or NULL. */
-static uint8_t *adt_prop(uint8_t *dt, uint64_t len, const char *node, const char *prop, uint32_t *plen) {
+/* The property's value in the child of the root called `node`, or NULL; with `node_at`, where that node starts
+   (also when it lacks the property). */
+static uint8_t *adt_find(uint8_t *dt, uint64_t len, const char *node, const char *prop, uint32_t *plen, uint64_t *node_at_out) {
     if (len < 8) return NULL;
     uint32_t nprops = *(uint32_t *)dt, nkids = *(uint32_t *)(dt + 4);
     uint64_t at = 8;
@@ -167,11 +170,33 @@ static uint8_t *adt_prop(uint8_t *dt, uint64_t len, const char *node, const char
             if (!strncmp((char *)dt + p, prop, 32) && p + 36 + l <= len) found = dt + p + 36, *plen = l;
             p += 36 + (l + 3) / 4 * 4;
         }
-        if (named) return found;
+        if (named) {
+            if (node_at_out) *node_at_out = node_at;
+            return found;
+        }
         if (adt_skip(dt, len, node_at, &next)) return NULL;
         at = next;
     }
     return NULL;
+}
+
+static uint8_t *adt_prop(uint8_t *dt, uint64_t len, const char *node, const char *prop, uint32_t *plen) {
+    return adt_find(dt, len, node, prop, plen, NULL);
+}
+
+/* A u32 property added to a node, as its first: the rest of the tree moves up 40 bytes. Only into the slack between
+   the tree's end and its 16 KB page's (what iBoot leaves unused), and boot_args gets the new length. */
+static int adt_add(uint8_t *dt, uint32_t *dtlen, uint64_t room, uint64_t node_at, const char *prop, uint32_t value) {
+    uint64_t len = *dtlen, at = node_at + 8;
+    if (len + 40 > room || at > len) return -1;
+    memmove(dt + at + 40, dt + at, len - at);
+    memset(dt + at, 0, 32);
+    strncpy((char *)dt + at, prop, 31);
+    *(uint32_t *)(dt + at + 32) = 4;
+    *(uint32_t *)(dt + at + 36) = value;
+    *(uint32_t *)(dt + node_at) += 1;
+    *dtlen = (uint32_t)(len + 40);
+    return 0;
 }
 
 static int adt_done;
@@ -203,6 +228,7 @@ static void adt_patch_poll(void) {
         if (h[0] < 2 || h[0] > 3 || h[1] < 1 || h[1] > 3) continue;
         if (q[1] >> 40 != 0xfffffe || q[2] < VMAPPLE_MEM || q[2] >= VMAPPLE_MEM + size || q[3] == 0 || q[3] > size) continue;
         uint64_t dtp = *(const uint64_t *)(b + 0x60), dtlen = *(const uint32_t *)(b + 0x68);
+        uint32_t *dtlen_at = (uint32_t *)(board.ram + off + 0x68);
         uint64_t pa = dtp - q[1] + q[2];
         if (dtp < q[1] || pa < VMAPPLE_MEM || pa - VMAPPLE_MEM + dtlen > size || dtlen < 8) continue;
         uint8_t *dt = board.ram + (pa - VMAPPLE_MEM);
@@ -212,9 +238,22 @@ static void adt_patch_poll(void) {
         for (char *save, *item = strtok_r(buf, ",", &save); item; item = strtok_r(NULL, ",", &save)) {
             char node[64], prop[33];
             unsigned value;
-            if (sscanf(item, "%63[^/]/%32[^=]=%i", node, prop, (int *)&value) != 3) continue;
+            int add = *item == '+'; /* +node/prop=value: added if the tree lacks it */
+            if (sscanf(item + add, "%63[^/]/%31[^=]=%i", node, prop, (int *)&value) != 3) continue;
             uint32_t l = 0;
-            uint8_t *v = adt_prop(dt, dtlen, node, prop, &l);
+            uint64_t node_at = 0;
+            uint8_t *v = adt_find(dt, *dtlen_at, node, prop, &l, &node_at);
+            if (!v && add && node_at) {
+                uint64_t room = ((pa + dtlen + 0x3fff) & ~0x3fffull) - pa;
+                if (adt_add(dt, dtlen_at, room, node_at, prop, value) == 0) {
+                    fprintf(stderr, "hengevm: adt patch: /%s %s added = %u (tree %llu -> %u bytes)\n", node, prop, value,
+                            (unsigned long long)dtlen, *dtlen_at);
+                } else {
+                    fprintf(stderr, "hengevm: adt patch: no room to add /%s %s (tree %u bytes, room %llu)\n", node, prop,
+                            *dtlen_at, (unsigned long long)room);
+                }
+                continue;
+            }
             if (!v || l < 4) {
                 fprintf(stderr, "hengevm: adt patch: /%s %s not in the guest's tree (%s)\n", node, prop, v ? "too short" : "missing");
                 continue;
