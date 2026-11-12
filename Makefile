@@ -173,6 +173,12 @@ $(IB)/libhengetl.a: $(TL_IOS_OBJ) $(TL_SHIM_IOS_OBJ) $(IB)/tl/shim/hk_symbols.o
 ios-lib: $(IB)/libhengevm.a $(IB)/libhengetl.a
 .PHONY: ios-lib
 
+# ENGINE_DEFS can change the HvCpu layout, so every engine object is rebuilt when it changes: mixing objects
+# built under two settings links without complaint and breaks at run time.
+DEFS_STAMP = $(B)/engine-defs.stamp
+$(shell mkdir -p $(B); [ -f $(DEFS_STAMP) ] && [ "$$(cat $(DEFS_STAMP))" = "$(ENGINE_DEFS)" ] || printf '%s' "$(ENGINE_DEFS)" > $(DEFS_STAMP))
+$(ENGINE) $(DEV) $(IOS_OBJ): $(DEFS_STAMP)
+
 # The app's glue to it (ios/Henge/Native/henge-tl.c) on the Mac: import a disk image, describe what it holds, run a program.
 $(B)/test_tl_glue: tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(TL_SRC) host/jit_region.c | $(B)
 	$(CC) $(CFLAGS) -fblocks -Iios/Henge/Native tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(filter-out %.m,$(TL_SRC)) host/jit_region.c \
