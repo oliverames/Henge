@@ -26,7 +26,7 @@ Each plane's view sits on the surface's guest-page buffer at `first + plane offs
 ## Duo test plan
 Install duo-test-safari's Henge.app. Guest auto-logs in; SSH via Tailscale works (macos-duo).
 1. Before (old path): add `HV_PVG_PLANAR_COPY=1` to Documents/henge-env.txt, boot, wait for the desktop, then
-   `ssh oliverames@macos-duo 'open -a Safari https://en.wikipedia.org/wiki/Vermont'`; snaps at 40 s, then after Page Down x2 (autopilot `key 78`, HID Page Down) and a snap each. Then open https://www.apple.com (video/large images).
+   `ssh oliverames@macos-duo 'open -a Safari https://en.wikipedia.org/wiki/Vermont'`; snaps at 40 s, then after Page Down x2 (autopilot `key 109`, evdev KEY_PAGEDOWN) and a snap each. Then open https://www.apple.com (video/large images).
 2. After (fix): remove that line, reboot the guest, repeat step 1 exactly.
 3. Regressions on the "after" boot: desktop/lock-screen wallpaper not green; a video plays with correct colour (apple.com hero video, or QuickTime on any .mov); Finder windows of /Applications and /System/Applications show their icons; the Start Page still renders.
 4. Logs: copy henge-native.log after each run. Grep `fourcc b3a8`, `on its pages at`, `cannot sit on its pages`, `shares the host surface`, `failed`, `panic`.
