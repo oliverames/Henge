@@ -184,11 +184,15 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     id<MTLFunction> stand_in; /* computeStandIn */
     /* Compiled pipelines kept across sessions (pipelineState:descriptor:). iOS clears its own shader cache between
        launches, so without this every boot compiles each of macOS's pipelines again, about half a second apiece. */
-    id<MTLBinaryArchive> archive;
-    NSURL *archive_url;
+    id<MTLBinaryArchive> archive; /* being filled */
+    NSArray<id<MTLBinaryArchive>> *archives; /* saved: earlier boots' files, and this session's saves */
+    NSURL *archive_dir;
+    NSString *archive_prefix;
+    int archive_next; /* the next file's number */
+    unsigned long long archive_bytes;
     BOOL archive_dirty, archive_full;
     uint32_t archive_save_seq; /* the save scheduled last: earlier ones see a newer one and leave it to that */
-    uint64_t pipes_hit, pipes_compiled, pipes_unsaved;
+    uint64_t pipes_hit, pipes_compiled, pipes_unsaved, pipes_unsaveable;
     double compile_ms, hit_ms;
     id<MTLTexture> cursor_tex;
     id<MTLSamplerState> screen_sampler, cursor_sampler;
@@ -572,11 +576,25 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
 }
 
 /* Saved pipelines. iOS empties its own Metal shader cache between launches, so every boot compiled each of macOS's
-   pipelines again (420 to 550 ms apiece on the Duo). They are kept in a binary archive instead: one per OS build and
-   GPU, since a compiled pipeline is only good for the compiler and GPU that made it, and an archive from another
-   build is removed rather than loaded. Application Support, not Caches: iOS purges Caches. HV_PVG_ARCHIVE=0: no
-   archive (for A/B); HV_PVG_ARCHIVE=reset: start an empty one. HV_PVG_ARCHIVE_MB: stop adding past this size
-   (default 768). */
+   pipelines again (420 to 550 ms apiece on the Duo). They are kept in binary archives instead, in Application Support
+   (iOS purges Caches), named for the OS build and GPU: a compiled pipeline is only good for the compiler and GPU that
+   made it, and archives from another build are removed rather than loaded.
+   Each save writes a new file holding only the pipelines added since the last save, and every file is loaded at start:
+   on the Duo, serializing an archive that was loaded from a file wrote only what had been added to it, so one file
+   rewritten in place kept losing the earlier boots' pipelines. Past 32 files or the size cap nothing more is added.
+   HV_PVG_ARCHIVE=0: none (for A/B); HV_PVG_ARCHIVE=reset: start again. HV_PVG_ARCHIVE_MB: the cap (default 768). */
+static unsigned long long archive_cap(void) {
+    const char *mb = getenv("HV_PVG_ARCHIVE_MB");
+    return (mb && atoi(mb) > 0 ? (unsigned long long)atoi(mb) : 768ull) << 20;
+}
+
+- (id<MTLBinaryArchive>)emptyArchive {
+    NSError *err = nil;
+    id<MTLBinaryArchive> a = [device newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&err];
+    if (!a) fprintf(stderr, "hengevm: pvg-metal: saved pipelines unavailable: %s\n", err.localizedDescription.UTF8String ?: "?");
+    return a;
+}
+
 - (void)openArchive {
     const char *opt = getenv("HV_PVG_ARCHIVE");
     if (opt && !strcmp(opt, "0")) {
@@ -597,35 +615,43 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     sysctlbyname("kern.osversion", build, &len, NULL, 0);
     NSString *gpu = [[device.name componentsSeparatedByCharactersInSet:NSCharacterSet.alphanumericCharacterSet.invertedSet]
         componentsJoinedByString:@"-"];
-    NSString *name = [NSString stringWithFormat:@"pipelines-%s-%@.bin", build, gpu];
-    for (NSURL *u in [fm contentsOfDirectoryAtURL:dir includingPropertiesForKeys:nil options:0 error:nil])
-        if (![u.lastPathComponent isEqualToString:name]) [fm removeItemAtURL:u error:nil]; /* other builds, unfinished saves */
-    archive_url = [dir URLByAppendingPathComponent:name];
-    if (opt && !strcmp(opt, "reset")) [fm removeItemAtURL:archive_url error:nil];
-    unsigned long long bytes = [[fm attributesOfItemAtPath:archive_url.path error:nil] fileSize];
-    MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new];
-    if (bytes) {
-        d.url = archive_url;
-        archive = [device newBinaryArchiveWithDescriptor:d error:&err];
-        if (!archive) {
-            fprintf(stderr, "hengevm: pvg-metal: saved pipelines unreadable, starting again: %s\n", err.localizedDescription.UTF8String ?: "?");
-            [fm removeItemAtURL:archive_url error:nil];
-            bytes = 0;
+    archive_dir = dir;
+    archive_prefix = [NSString stringWithFormat:@"pipelines-%s-%@-", build, gpu];
+    NSMutableArray<id<MTLBinaryArchive>> *loaded = [NSMutableArray new];
+    unsigned long long bytes = 0;
+    unsigned unreadable = 0;
+    NSArray<NSURL *> *files = [[fm contentsOfDirectoryAtURL:dir includingPropertiesForKeys:nil options:0 error:nil]
+        sortedArrayUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) { return [a.lastPathComponent compare:b.lastPathComponent options:NSNumericSearch]; }];
+    for (NSURL *u in files) {
+        NSString *name = u.lastPathComponent;
+        int n = 0;
+        BOOL ours = [name hasPrefix:archive_prefix] && [name hasSuffix:@".bin"] &&
+                    sscanf(name.UTF8String + archive_prefix.length, "%d.bin", &n) == 1 && !(opt && !strcmp(opt, "reset"));
+        if (!ours) { /* another build, an unfinished save, or a reset */
+            [fm removeItemAtURL:u error:nil];
+            continue;
         }
-    }
-    if (!archive) {
-        d.url = nil;
+        MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new];
+        d.url = u;
         err = nil;
-        archive = [device newBinaryArchiveWithDescriptor:d error:&err];
+        id<MTLBinaryArchive> a = [device newBinaryArchiveWithDescriptor:d error:&err];
+        if (!a) {
+            fprintf(stderr, "hengevm: pvg-metal: saved pipelines: %s unreadable, removed: %s\n", name.UTF8String, err.localizedDescription.UTF8String ?: "?");
+            [fm removeItemAtURL:u error:nil];
+            unreadable++;
+            continue;
+        }
+        [loaded addObject:a];
+        bytes += [[fm attributesOfItemAtPath:u.path error:nil] fileSize];
+        if (n >= archive_next) archive_next = n + 1;
     }
-    if (!archive) {
-        fprintf(stderr, "hengevm: pvg-metal: saved pipelines unavailable: %s\n", err.localizedDescription.UTF8String ?: "?");
-        return;
-    }
-    const char *mb = getenv("HV_PVG_ARCHIVE_MB");
-    archive_full = bytes > (mb && atoi(mb) > 0 ? (unsigned long long)atoi(mb) : 768ull) << 20;
-    fprintf(stderr, "hengevm: pvg-metal: saved pipelines: %s, %.1f MB%s\n", name.UTF8String, bytes / 1048576.0,
-            archive_full ? " (full: nothing more is added)" : "");
+    archive = [self emptyArchive];
+    if (!archive) return;
+    archives = loaded;
+    archive_bytes = bytes;
+    archive_full = loaded.count >= 32 || bytes > archive_cap();
+    fprintf(stderr, "hengevm: pvg-metal: saved pipelines: %lu files, %.1f MB%s%s\n", (unsigned long)loaded.count, bytes / 1048576.0,
+            unreadable ? " (some unreadable, removed)" : "", archive_full ? " (full: nothing more is added)" : "");
 }
 
 - (id)newState:(uint32_t)tag descriptor:(id)descriptor options:(MTLPipelineOption)options error:(NSError **)err {
@@ -634,19 +660,23 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     return [device newComputePipelineStateWithDescriptor:descriptor options:options reflection:nil error:err];
 }
 
-/* A render (0xe), tile (0x33) or compute (0xb) pipeline. Looked up in the saved archive first; on a miss it is
-   compiled into the archive and then made from it, so the next boot finds it. */
+/* A render (0xe), tile (0x33) or compute (0xb) pipeline. Looked up in the saved archives first; on a miss it is
+   compiled into the archive being filled and then made from it, so the next boot finds it. A render pipeline with no
+   fragment function (depth only, or rasterization off) is made but not saved: Metal refuses to add one ("expecting
+   'fragment' stage"). */
 - (id)pipelineState:(uint32_t)tag descriptor:(id)descriptor error:(NSError **)err {
     double t0 = now_seconds();
     if (archive) {
-        [descriptor setBinaryArchives:@[archive]];
+        [descriptor setBinaryArchives:[archives arrayByAddingObject:archive]];
         id state = [self newState:tag descriptor:descriptor options:MTLPipelineOptionFailOnBinaryArchiveMiss error:nil];
         if (state) {
             pipes_hit++;
             hit_ms += (now_seconds() - t0) * 1e3;
             return state;
         }
-        if (!archive_full) {
+        if (tag == 0xe && ![(MTLRenderPipelineDescriptor *)descriptor fragmentFunction]) {
+            pipes_unsaveable++;
+        } else if (!archive_full) {
             NSError *e = nil;
             BOOL added = tag == 0xe    ? [archive addRenderPipelineFunctionsWithDescriptor:descriptor error:&e]
                          : tag == 0x33 ? [archive addTileRenderPipelineFunctionsWithDescriptor:descriptor error:&e]
@@ -656,6 +686,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
                 pipes_unsaved++;
                 [self scheduleArchiveSave];
             } else {
+                pipes_unsaveable++;
                 [self complain:[NSString stringWithFormat:@"saved pipelines: pipeline %u not added: %@", tag, e.localizedDescription]];
             }
         }
@@ -665,8 +696,8 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         pipes_compiled++;
         compile_ms += (now_seconds() - t0) * 1e3;
         if (pipes_compiled == 1 || pipes_compiled % 100 == 0)
-            fprintf(stderr, "hengevm: pvg-metal: pipelines: %llu compiled (%.0f ms each), %llu from the saved archive (%.1f ms each)\n",
-                    pipes_compiled, compile_ms / pipes_compiled, pipes_hit, pipes_hit ? hit_ms / pipes_hit : 0.0);
+            fprintf(stderr, "hengevm: pvg-metal: pipelines: %llu compiled (%.0f ms each), %llu from the saved archives (%.1f ms each), %llu not saveable\n",
+                    pipes_compiled, compile_ms / pipes_compiled, pipes_hit, pipes_hit ? hit_ms / pipes_hit : 0.0, pipes_unsaveable);
     }
     return state;
 }
@@ -687,27 +718,34 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     });
 }
 
+/* The archive being filled goes to a new file of its own, then joins the saved ones and an empty one takes its place. */
 - (void)saveArchive {
     if (!archive || !archive_dirty) return;
     double t0 = now_seconds();
-    /* Into a new file, then renamed over the old: the archive loaded at start still reads the old one. */
-    NSURL *tmp = [archive_url URLByAppendingPathExtension:@"new"];
     NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *to = [archive_dir URLByAppendingPathComponent:[NSString stringWithFormat:@"%@%d.bin", archive_prefix, archive_next]];
+    NSURL *tmp = [to URLByAppendingPathExtension:@"new"];
     [fm removeItemAtURL:tmp error:nil];
     NSError *err = nil;
-    if (![archive serializeToURL:tmp error:&err] || rename(tmp.fileSystemRepresentation, archive_url.fileSystemRepresentation) != 0) {
+    if (![archive serializeToURL:tmp error:&err] || rename(tmp.fileSystemRepresentation, to.fileSystemRepresentation) != 0) {
         [self complain:[NSString stringWithFormat:@"saved pipelines: not written: %@", err ? err.localizedDescription : @(strerror(errno))]];
         [fm removeItemAtURL:tmp error:nil];
         return;
     }
+    id<MTLBinaryArchive> next = [self emptyArchive];
+    if (!next) return; /* keeps filling the same one, and a later save writes it again in full under a new number */
+    unsigned long long bytes = [[fm attributesOfItemAtPath:to.path error:nil] fileSize];
+    archive_next++;
+    archive_bytes += bytes;
+    archives = [archives arrayByAddingObject:archive];
+    archive = next;
     archive_dirty = NO;
-    unsigned long long bytes = [[fm attributesOfItemAtPath:archive_url.path error:nil] fileSize];
-    const char *mb = getenv("HV_PVG_ARCHIVE_MB");
-    if (bytes > (mb && atoi(mb) > 0 ? (unsigned long long)atoi(mb) : 768ull) << 20) archive_full = YES;
-    fprintf(stderr, "hengevm: pvg-metal: saved pipelines: %llu added, %.1f MB written in %.0f ms%s; this session %llu from the archive "
-                    "(%.1f ms each), %llu compiled (%.0f ms each)\n",
-            pipes_unsaved, bytes / 1048576.0, (now_seconds() - t0) * 1e3, archive_full ? " (now full)" : "", pipes_hit,
-            pipes_hit ? hit_ms / pipes_hit : 0.0, pipes_compiled, pipes_compiled ? compile_ms / pipes_compiled : 0.0);
+    if (archives.count >= 32 || archive_bytes > archive_cap()) archive_full = YES;
+    fprintf(stderr, "hengevm: pvg-metal: saved pipelines: %llu added in file %d (%.1f MB, %.1f MB in %lu files) in %.0f ms%s; this session %llu from the "
+                    "archives (%.1f ms each), %llu compiled (%.0f ms each), %llu not saveable\n",
+            pipes_unsaved, archive_next - 1, bytes / 1048576.0, archive_bytes / 1048576.0, (unsigned long)archives.count,
+            (now_seconds() - t0) * 1e3, archive_full ? " (now full)" : "", pipes_hit, pipes_hit ? hit_ms / pipes_hit : 0.0,
+            pipes_compiled, pipes_compiled ? compile_ms / pipes_compiled : 0.0, pipes_unsaveable);
     pipes_unsaved = 0;
 }
 
