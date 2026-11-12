@@ -187,6 +187,43 @@ enum PointerLock {
     }
 }
 
+/// On iPhone, UIKit keeps its pointer machinery for iPad: a pointer interaction's drivers stay detached from
+/// its view, so the hidden style the trackpad asks for over the Mac never reaches AssistiveTouch's pointer.
+/// This attaches them after UIKit's own update, as on iPad, so the request is at least made. The idea comes
+/// from Madeira's iPhone hover experiment (written anew here). Private: `_updateInteractionIsEnabled`, and the
+/// interaction's `drivers` (or older `driver`) whose `setView:` takes the view. Each step checks it exists.
+enum PhonePointer {
+    private static var original: IMP?
+    private(set) static var status = "not run"
+
+    static func install() {
+        guard !Device.isPad, original == nil else { return }
+        let selector = NSSelectorFromString("_updateInteractionIsEnabled")
+        guard let method = class_getInstanceMethod(UIPointerInteraction.self, selector) else {
+            status = "unavailable"
+            HengeLog.log("input", "phone pointer: \(status)")
+            return
+        }
+        typealias Update = @convention(c) (AnyObject, Selector) -> Void
+        let replacement: @convention(block) (AnyObject) -> Void = { object in
+            if let original { unsafeBitCast(original, to: Update.self)(object, selector) }
+            guard let interaction = object as? UIPointerInteraction, interaction.isEnabled, let view = interaction.view else { return }
+            for driver in drivers(of: interaction) where driver.responds(to: NSSelectorFromString("setView:")) {
+                driver.setValue(view, forKey: "view")
+            }
+        }
+        original = method_setImplementation(method, imp_implementationWithBlock(replacement))
+        status = "installed"
+        HengeLog.log("input", "phone pointer: drivers attach as on iPad (\(status))")
+    }
+
+    private static func drivers(of interaction: UIPointerInteraction) -> [NSObject] {
+        if interaction.responds(to: NSSelectorFromString("drivers")), let list = interaction.value(forKey: "drivers") as? [NSObject] { return list }
+        if interaction.responds(to: NSSelectorFromString("driver")), let one = interaction.value(forKey: "driver") as? NSObject { return [one] }
+        return []
+    }
+}
+
 /// A Magic Keyboard's trackpad or a mouse, while a Mac is running. GameController gives the raw motion,
 /// which macOS then accelerates as it would for its own mouse. Once macOS has the Mac's USB mouse, it all
 /// goes there: real right, middle, back and forward buttons and the Mac's own Mouse settings. Before that

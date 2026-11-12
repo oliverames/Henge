@@ -53,6 +53,10 @@ struct Trackpad: UIViewRepresentable {
         /// Over the Mac there is only the Mac's pointer, if iPadOS hasn't locked its own away.
         func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? { .hidden() }
 
+        /// One region, the whole surface, so the hidden style never lapses back to the system pointer between regions.
+        func pointerInteraction(_ interaction: UIPointerInteraction, regionFor request: UIPointerRegionRequest,
+                                defaultRegion: UIPointerRegion) -> UIPointerRegion? { UIPointerRegion(rect: bounds) }
+
         required init?(coder: NSCoder) { fatalError("made in code") }
 
         /// Where the finger is on the pad's sensor, in its units.

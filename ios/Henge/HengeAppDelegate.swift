@@ -4,6 +4,7 @@ import UIKit
 final class HengeAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         MacShortcuts.configure()
+        PhonePointer.install() // before any view adds a pointer interaction
         HengeAudio.shared.start()
         return true
     }
