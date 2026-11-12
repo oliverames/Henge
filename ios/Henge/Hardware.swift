@@ -307,7 +307,17 @@ final class HardwareMouse {
             guard let self, let mouse else { return }
             let scenes = UIApplication.shared.connectedScenes.map { "\($0.session.role.rawValue):\($0.activationState.rawValue)" }
             let moves = self.queue.sync { self.movesLogged }
-            HengeLog.log("input", "mouse 5 s on: current \(GCMouse.current === mouse), moves seen \(moves), left now \(mouse.mouseInput?.leftButton.isPressed ?? false), scenes \(scenes)")
+            let lock = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                .map { $0.pointerLockState.map { $0.isLocked ? "locked" : "unlocked" } ?? "no lock state" }
+            HengeLog.log("input", "mouse 5 s on: current \(GCMouse.current === mouse), moves seen \(moves), left now \(mouse.mouseInput?.leftButton.isPressed ?? false), scenes \(scenes), pointer lock \(lock)")
+        }
+        // Polled state, apart from the handlers: if this changes while no handler runs, delivery is the problem, not input.
+        for second in 1...20 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(second)) { [weak mouse] in
+                guard let input = mouse?.mouseInput else { return }
+                let pressed = [input.leftButton, input.rightButton, input.middleButton].compactMap { $0 }.map { $0.isPressed ? "1" : "0" }.joined()
+                HengeLog.log("input", "mouse poll \(second) s: buttons \(pressed), scroll \(input.scroll.xAxis.value), \(input.scroll.yAxis.value)")
+            }
         }
     }
 
