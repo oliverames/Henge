@@ -213,13 +213,26 @@ static void display_put_modes(uint8_t *d, uint32_t w, uint32_t h) {
 #undef PUTF
 }
 
-/* Tells the guest the mode list changed: a new sequence number for it to ack, and the mode-change event. */
-static void display_announce(HvPvgLite *p, uint8_t *d) {
+/* Display events, as ParavirtualizedGraphics raises them (_PGDisplayNub's state machine): the bits ORed into +100;
+   if the guest's mask at +104 takes any of them, the port's bit (display 0) goes into +1014, which clears when read,
+   and the interrupt is raised. */
+static void display_event(HvPvgLite *p, uint8_t *d, uint32_t bits) {
+    uint32_t mask = __atomic_load_n((uint32_t *)(d + 0x104), __ATOMIC_ACQUIRE);
+    __atomic_fetch_or((uint32_t *)(d + 0x100), bits, __ATOMIC_ACQ_REL);
+    if (mask & bits) {
+        __atomic_fetch_or(&p->display_bits, 1, __ATOMIC_ACQ_REL);
+        hv_gicv3_pend(p->gic, p->gfx_irq);
+    }
+}
+
+/* A mode list for the guest to ack: the next sequence number, ack pending, the events (4 the first time, the hotplug;
+   0xc for a change after an ack), and the state (1, waiting for the ack) stored last. */
+static void display_announce(HvPvgLite *p, uint8_t *d, uint32_t events) {
     p->display_seq++;
     *(uint32_t *)(d + 0x200) = p->display_seq;
-    d[0xfa9] = 1;                    /* ack pending */
-    *(uint32_t *)(d + 0xfc0) = 1;    /* state: told the guest, waiting for the ack */
-    __atomic_fetch_or((uint32_t *)(d + 0x100), 4, __ATOMIC_RELEASE); /* mode change: read when the guest sets its mask */
+    d[0xfa9] = 1;
+    display_event(p, d, events);
+    __atomic_store_n((uint32_t *)(d + 0xfc0), 1, __ATOMIC_RELEASE);
 }
 
 static void display_set_page(HvPvgLite *p, uint64_t pa) {
@@ -241,7 +254,7 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
     PUTF(0xa38, 1.0f);
     d[0xa73] = 1;
     p->display_seq = 0;
-    display_announce(p, d);
+    display_announce(p, d, 4);
 #undef PUT32
 #undef PUTF
 }
@@ -251,11 +264,12 @@ static void display_ack(HvPvgLite *p, uint32_t seq) {
     if (!d) return;
     fprintf(stderr, "hengevm: pvg-lite: display ack %u (published %u, %ux%u)\n", seq, p->display_seq,
             (unsigned)(p->display_mode >> 32), (unsigned)p->display_mode);
+    /* As the framework: an ack counts only for the list waiting for one. A size asked for meanwhile goes out on the
+       next poll, now that the state is 2. */
+    if (!d[0xfa9] || seq != *(uint32_t *)(d + 0x200)) return;
     *(uint32_t *)(d + 0xfbc) = seq;
-    if (seq != p->display_seq) return; /* an older list's ack: the newer one is still waiting */
-    __atomic_fetch_and(&p->display_bits, ~1u, __ATOMIC_ACQ_REL);
     d[0xfa9] = 0;
-    *(uint32_t *)(d + 0xfc0) = 2;
+    __atomic_store_n((uint32_t *)(d + 0xfc0), 2, __ATOMIC_RELEASE);
     __atomic_store_n(&p->display_taken, p->display_mode, __ATOMIC_RELEASE);
 }
 
@@ -266,28 +280,22 @@ int hv_pvg_lite_display_mode(HvPvgLite *p, uint32_t *width, uint32_t *height) {
     return 0;
 }
 
-/* A size given while macOS runs goes to the guest at once, also over a list it has not acked yet (a fold then an
-   unfold): it acks the newest sequence number it reads. Device lock held. */
+/* A size given while macOS runs: sent once the guest has acked the last list (state 2), as the framework does; until
+   then it waits, and the newest size asked for is the one sent. Device lock held. */
 static void display_follow(HvPvgLite *p) {
     uint32_t gen = atomic_load_explicit(&display_gen, memory_order_acquire);
     if (gen == p->display_gen || !p->display_pa) return;
     uint8_t *d = hv_phys_ptr(p->m, p->display_pa, 0x4000);
-    if (!d) return;
+    if (!d || __atomic_load_n((uint32_t *)(d + 0xfc0), __ATOMIC_ACQUIRE) != 2) return;
     p->display_gen = gen;
     uint64_t size = atomic_load(&display_size);
     float ppmm = atomic_load(&display_ppmm);
     if (size == p->display_mode && ppmm == p->display_ppmm) return; /* nothing the guest has not got */
     p->display_mode = size, p->display_ppmm = ppmm;
-    uint8_t unacked = d[0xfa9];
     display_put_modes(d, (uint32_t)(size >> 32), (uint32_t)size);
-    display_announce(p, d);
-    /* After boot the guest learns of a display event from its interrupt: the display's bit in +1014 (display 0), as
-       the stamps' bits are in +1018. At boot it reads the page itself when it sets its mask. */
-    __atomic_fetch_or(&p->display_bits, 1, __ATOMIC_ACQ_REL);
-    p->display_reads_logged = 0;
-    fprintf(stderr, "hengevm: pvg-lite: display mode %ux%u (seq %u, +100 %x, mask %x, ack pending was %u)\n", (unsigned)(size >> 32),
-            (unsigned)size, p->display_seq, *(uint32_t *)(d + 0x100), *(uint32_t *)(d + 0x104), unacked);
-    hv_gicv3_pend(p->gic, p->gfx_irq);
+    display_announce(p, d, 0xc);
+    fprintf(stderr, "hengevm: pvg-lite: display mode %ux%u (seq %u, +100 %x, mask %x)\n", (unsigned)(size >> 32), (unsigned)size,
+            p->display_seq, *(uint32_t *)(d + 0x100), *(uint32_t *)(d + 0x104));
 }
 
 static int task_read(HvPvgLite *p, uint32_t task, uint64_t off, void *to, uint32_t n);
@@ -802,9 +810,8 @@ static void vblank(HvPvgLite *p) {
     uint64_t now = mach_absolute_time();
     if (now < next) return;
     next = now + period;
-    __atomic_fetch_or((uint32_t *)(d + 0x100), 8, __ATOMIC_RELEASE);
+    display_event(p, d, 8);
     p->vblanks++;
-    hv_gicv3_pend(p->gic, p->gfx_irq);
 }
 
 void hv_pvg_lite_poll(HvPvgLite *p) {
@@ -832,9 +839,9 @@ static uint64_t gfx_read(void *opaque, uint64_t off, unsigned size) {
         v = __atomic_exchange_n(&p->status, 0, __ATOMIC_ACQ_REL);
         break;
     case 0x122c: v = 1; break;
-    case 0x1014:
-        v = __atomic_load_n(&p->display_bits, __ATOMIC_ACQUIRE);
-        if (p->display_reads_logged++ < 4) fprintf(stderr, "hengevm: pvg-lite: guest reads +1014 = %llx\n", (unsigned long long)v);
+    case 0x1014: /* displays with an event, cleared by the read */
+        v = __atomic_exchange_n(&p->display_bits, 0, __ATOMIC_ACQ_REL);
+        if (v && p->display_reads_logged++ < 4) fprintf(stderr, "hengevm: pvg-lite: guest reads +1014 = %llx\n", (unsigned long long)v);
         break;
     default:
         if (off >= 0x1000 && off < 0x2000) v = p->regs[(off - 0x1000) / 4];
@@ -848,10 +855,6 @@ static void gfx_write(void *opaque, uint64_t off, uint64_t v, unsigned size) {
     HvPvgLite *p = opaque;
     (void)size;
     if (off >= 0x1000 && off < 0x2000) p->regs[(off - 0x1000) / 4] = (uint32_t)v;
-    if (off == 0x1014) { /* write 1 to clear, as far as can be told: logged until a trace says */
-        __atomic_fetch_and(&p->display_bits, ~(uint32_t)v, __ATOMIC_ACQ_REL);
-        if (p->display_reads_logged < 8) fprintf(stderr, "hengevm: pvg-lite: guest writes +1014 = %llx\n", (unsigned long long)v);
-    }
     /* Doorbells are answered here, on the CPU that rang: no waiting for CPU 0 to come by. */
     if (off == 0x1008) {
         do_root(p);
