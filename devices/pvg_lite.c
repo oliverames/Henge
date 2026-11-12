@@ -95,6 +95,8 @@ struct HvPvgLite {
     uint64_t display_mode;   /* width << 32 | height last told */
     float display_ppmm;      /* and the density that went with it */
     uint64_t display_taken;  /* the same for the list the guest acked last */
+    uint32_t display_bits;   /* +1014: displays with an event for the guest */
+    int display_reads_logged;
 };
 
 /* What the guest's GetDeviceInfo asks for: key, value pairs, as the framework
@@ -251,6 +253,7 @@ static void display_ack(HvPvgLite *p, uint32_t seq) {
             (unsigned)(p->display_mode >> 32), (unsigned)p->display_mode);
     *(uint32_t *)(d + 0xfbc) = seq;
     if (seq != p->display_seq) return; /* an older list's ack: the newer one is still waiting */
+    __atomic_fetch_and(&p->display_bits, ~1u, __ATOMIC_ACQ_REL);
     d[0xfa9] = 0;
     *(uint32_t *)(d + 0xfc0) = 2;
     __atomic_store_n(&p->display_taken, p->display_mode, __ATOMIC_RELEASE);
@@ -263,22 +266,27 @@ int hv_pvg_lite_display_mode(HvPvgLite *p, uint32_t *width, uint32_t *height) {
     return 0;
 }
 
-/* A size given while macOS runs: once the guest has taken the last list (no ack pending), it gets the new one. Device
-   lock held. */
+/* A size given while macOS runs goes to the guest at once, also over a list it has not acked yet (a fold then an
+   unfold): it acks the newest sequence number it reads. Device lock held. */
 static void display_follow(HvPvgLite *p) {
     uint32_t gen = atomic_load_explicit(&display_gen, memory_order_acquire);
     if (gen == p->display_gen || !p->display_pa) return;
     uint8_t *d = hv_phys_ptr(p->m, p->display_pa, 0x4000);
-    if (!d || __atomic_load_n(&d[0xfa9], __ATOMIC_ACQUIRE)) return;
+    if (!d) return;
     p->display_gen = gen;
     uint64_t size = atomic_load(&display_size);
     float ppmm = atomic_load(&display_ppmm);
     if (size == p->display_mode && ppmm == p->display_ppmm) return; /* nothing the guest has not got */
     p->display_mode = size, p->display_ppmm = ppmm;
+    uint8_t unacked = d[0xfa9];
     display_put_modes(d, (uint32_t)(size >> 32), (uint32_t)size);
     display_announce(p, d);
-    fprintf(stderr, "hengevm: pvg-lite: display mode %ux%u (seq %u, mask %x)\n", (unsigned)(size >> 32), (unsigned)size,
-            p->display_seq, *(uint32_t *)(d + 0x104));
+    /* After boot the guest learns of a display event from its interrupt: the display's bit in +1014 (display 0), as
+       the stamps' bits are in +1018. At boot it reads the page itself when it sets its mask. */
+    __atomic_fetch_or(&p->display_bits, 1, __ATOMIC_ACQ_REL);
+    p->display_reads_logged = 0;
+    fprintf(stderr, "hengevm: pvg-lite: display mode %ux%u (seq %u, +100 %x, mask %x, ack pending was %u)\n", (unsigned)(size >> 32),
+            (unsigned)size, p->display_seq, *(uint32_t *)(d + 0x100), *(uint32_t *)(d + 0x104), unacked);
     hv_gicv3_pend(p->gic, p->gfx_irq);
 }
 
@@ -824,6 +832,10 @@ static uint64_t gfx_read(void *opaque, uint64_t off, unsigned size) {
         v = __atomic_exchange_n(&p->status, 0, __ATOMIC_ACQ_REL);
         break;
     case 0x122c: v = 1; break;
+    case 0x1014:
+        v = __atomic_load_n(&p->display_bits, __ATOMIC_ACQUIRE);
+        if (p->display_reads_logged++ < 4) fprintf(stderr, "hengevm: pvg-lite: guest reads +1014 = %llx\n", (unsigned long long)v);
+        break;
     default:
         if (off >= 0x1000 && off < 0x2000) v = p->regs[(off - 0x1000) / 4];
         break;
@@ -836,6 +848,10 @@ static void gfx_write(void *opaque, uint64_t off, uint64_t v, unsigned size) {
     HvPvgLite *p = opaque;
     (void)size;
     if (off >= 0x1000 && off < 0x2000) p->regs[(off - 0x1000) / 4] = (uint32_t)v;
+    if (off == 0x1014) { /* write 1 to clear, as far as can be told: logged until a trace says */
+        __atomic_fetch_and(&p->display_bits, ~(uint32_t)v, __ATOMIC_ACQ_REL);
+        if (p->display_reads_logged < 8) fprintf(stderr, "hengevm: pvg-lite: guest writes +1014 = %llx\n", (unsigned long long)v);
+    }
     /* Doorbells are answered here, on the CPU that rang: no waiting for CPU 0 to come by. */
     if (off == 0x1008) {
         do_root(p);
