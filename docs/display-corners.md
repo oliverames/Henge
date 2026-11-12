@@ -41,3 +41,8 @@ Autopilot (`ios/Henge/Autopilot.swift`) has `screen W H` (a simulated rotation o
 ```
 osascript -l JavaScript -e 'ObjC.import("AppKit"); var s=$.NSScreen.mainScreen; JSON.stringify([s.safeAreaInsets, s.auxiliaryTopLeftArea])'
 ```
+
+## Reference material
+
+- The CoreUI lookup disassembly is in [duo/coreui-shape-lookup.md](duo/coreui-shape-lookup.md), and the shipped Eraserhead SVGs are in [duo/display-shapes/](duo/display-shapes/).
+- The 2026-11-12 Duo test results are in [duo/test-results-2026-11-12.md](duo/test-results-2026-11-12.md). That file covers the code cache, shader cache, stale panic, Safari, JIT and mouse results, plus the list of tests that did not run.
