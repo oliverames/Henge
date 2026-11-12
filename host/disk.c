@@ -74,6 +74,18 @@ int hv_disk_write(HvDisk *d, uint64_t off, const void *buf, uint64_t len) {
     return 0;
 }
 
+int hv_disk_zero(HvDisk *d, uint64_t off, uint64_t len) {
+    static const uint8_t zeros[64 << 10];
+    if (d->readonly || off > d->size || len > d->size - off) return -1;
+    while (len) {
+        uint64_t n = len > sizeof zeros ? sizeof zeros : len;
+        if (hv_disk_write(d, off, zeros, n) != 0) return -1;
+        off += n;
+        len -= n;
+    }
+    return 0;
+}
+
 /* HV_FLUSH: 0 fsync; 1 nothing here, what was written is safe in the host's cache as long as the
    host runs; 2 fcntl(F_BARRIERFSYNC). */
 int hv_disk_flush(HvDisk *d) {

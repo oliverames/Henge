@@ -10,16 +10,23 @@
 #define F_RO (1ull << 5)
 #define F_BLK_SIZE (1ull << 6)
 #define F_FLUSH (1ull << 9)
+#define F_DISCARD (1ull << 13)
+#define F_WRITE_ZEROES (1ull << 14)
 
 #define T_IN 0
 #define T_OUT 1
 #define T_FLUSH 4
 #define T_GET_ID 8
+#define T_DISCARD 11
+#define T_WRITE_ZEROES 13
 #define T_APPLE_BARRIER 0x10000
 
 #define S_OK 0
 #define S_IOERR 1
 #define S_UNSUPP 2
+
+/* Ranges one discard or write-zeroes request may carry (max_discard_seg, max_write_zeroes_seg). */
+#define ZERO_SEGS 32
 
 /* Disk I/O straight between the file and the guest's buffers: the
    segments of one direction, skipping `off` bytes of them, `len` bytes in all.
@@ -76,6 +83,25 @@ static int handle(HvVirtioBlk *b, HvVirtqElem *e, uint32_t *written) {
     case T_FLUSH:
         if (hv_disk_flush(b->disk) != 0) status = S_IOERR;
         break;
+    case T_DISCARD:
+    case T_WRITE_ZEROES: {
+        /* Both read back as zeros here: the aux disk's panic store is "cleared" by
+           DumpPanic with DKIOCUNMAP, which becomes a discard, and an unmapped
+           store has to read as empty or the old panic is reported every boot. */
+        uint64_t feature = hdr.type == T_DISCARD ? F_DISCARD : F_WRITE_ZEROES;
+        uint32_t rlen = readable(e) - (uint32_t)sizeof hdr;
+        if (!(v->driver_features & feature) || rlen % 16 || rlen / 16 > ZERO_SEGS || !rlen) {
+            status = (v->driver_features & feature) ? S_IOERR : S_UNSUPP;
+            break;
+        }
+        for (uint32_t at = 0; at < rlen && status == S_OK; at += 16) {
+            struct { uint64_t sector; uint32_t num_sectors, flags; } r;
+            if (hv_virtq_read(v, e, (uint32_t)sizeof hdr + at, &r, sizeof r) != sizeof r ||
+                hv_disk_zero(b->disk, r.sector * 512, (uint64_t)r.num_sectors * 512) != 0)
+                status = S_IOERR;
+        }
+        break;
+    }
     case T_GET_ID: {
         char id[20] = "hengevm-disk";
         uint32_t n = data < 20 ? data : 20;
@@ -265,7 +291,9 @@ HvVirtioBlk *hv_virtio_blk_create(HvMachine *m, HvPcie *bus, HvDisk *disk, int a
     HvVirtioBlk *b = calloc(1, sizeof *b);
     if (!b) return NULL;
     HvVirtio *v = &b->vio;
-    hv_virtio_init(v, m, 2, 0x010000, 1, F_SEG_MAX | F_BLK_SIZE | F_FLUSH | (disk->readonly ? F_RO : 0));
+    /* Discard and write-zeroes on the aux disk only, where the guest keeps its panic store. */
+    uint64_t zeroing = apple_variant == HV_VBLK_AUX && !disk->readonly ? F_DISCARD | F_WRITE_ZEROES : 0;
+    hv_virtio_init(v, m, 2, 0x010000, 1, F_SEG_MAX | F_BLK_SIZE | F_FLUSH | zeroing | (disk->readonly ? F_RO : 0));
     v->dev = b;
     v->notify = notify;
     b->disk = disk;
@@ -295,6 +323,14 @@ HvVirtioBlk *hv_virtio_blk_create(HvMachine *m, HvPcie *bus, HvDisk *disk, int a
     memcpy(v->config + 12, &seg_max, 4);
     memcpy(v->config + 20, &blk_size, 4);
     memcpy(v->config + 34, &num_queues, 2);
+    if (zeroing) {
+        uint32_t max_sectors = capacity > UINT32_MAX ? UINT32_MAX : (uint32_t)capacity, segs = ZERO_SEGS, align = 1;
+        memcpy(v->config + 36, &max_sectors, 4); /* max_discard_sectors */
+        memcpy(v->config + 40, &segs, 4);        /* max_discard_seg */
+        memcpy(v->config + 44, &align, 4);       /* discard_sector_alignment */
+        memcpy(v->config + 48, &max_sectors, 4); /* max_write_zeroes_sectors */
+        memcpy(v->config + 52, &segs, 4);        /* max_write_zeroes_seg */
+    }
     memcpy(v->config + 60, &apple_type, 4);
     v->config_len = 96;
     if (apple_variant) {
