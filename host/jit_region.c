@@ -91,6 +91,14 @@ void hv_jit_finish(HvJitRegion *region, uint32_t *start, size_t words) {
     if (start && words) sys_icache_invalidate(start, words * sizeof(uint32_t));
 }
 
+void hv_jit_poison(HvJitRegion *region, uint32_t *start, size_t words) {
+#if TARGET_OS_OSX
+    if (!region->rw_diff) pthread_jit_write_protect_np(0); /* MAP_JIT: a direct write faults until this */
+#endif
+    memset((uint8_t *)start + region->rw_diff, 0, words * sizeof(uint32_t));
+    hv_jit_finish(region, start, words);
+}
+
 /* As sys_icache_invalidate does it (libsystem_platform: DSB, IC IVAU per 64-byte line with a DSB after every 20 for
    the CPUs that need one, DSB, ISB), over both ranges. */
 static void ic_lines(uint32_t *start, size_t words, int *n) {
