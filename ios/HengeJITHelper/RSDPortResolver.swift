@@ -8,7 +8,8 @@ import dnssd
 /// 49152 StikJIT falls back to is closed then, so every attempt times out at 10.7.0.1:49152. Henge's own lookup
 /// (RemotePairingPortDiscovery) connects to the service to learn its port, and on some devices that never
 /// becomes ready. This reads the port from the service's SRV record with DNSServiceResolve instead, which
-/// needs no connection.
+/// needs no connection. Other devices on the network advertise the same service, so it takes the result on the
+/// loopback interface, which is this device's own (see RemotePairingChoice).
 enum RSDPortResolver {
     struct Result {
         var port: UInt16?
@@ -40,9 +41,10 @@ enum RSDPortResolver {
             DNSServiceRefDeallocate(browseRef)
             state.resolveRefs.forEach(DNSServiceRefDeallocate)
             state.resolveRefs.removeAll()
+            if !found { state.choose(final: true) }
             state.finished = true
-            if found, let port = state.port {
-                return Result(port: port, detail: "resolved \(serviceType) to port \(port) on \(state.host ?? "?")")
+            if let port = state.port {
+                return Result(port: port, detail: "resolved \(serviceType) to port \(port) on \(state.host ?? "?") via \(state.chosenNote)")
             }
             var detail = "no port within \(Int(timeout))s: \(state.seen) service(s) seen"
             if let error = state.lastError { detail += ", last error \(describe(error))" }
@@ -58,13 +60,42 @@ enum RSDPortResolver {
         var seen = 0
         var port: UInt16?
         var host: String?
+        var chosenNote = ""
         var lastError: DNSServiceErrorType?
         var finished = false
+        var candidates: [(port: UInt16, host: String, interface: String)] = []
+        var firstResultAt: Date?
+        var waitScheduled = false
 
-        func finish(port: UInt16, host: String) {
-            guard self.port == nil, !finished else { return }
-            self.port = port
-            self.host = host
+        func add(port: UInt16, host: String, interface: String) {
+            if firstResultAt == nil { firstResultAt = Date() }
+            candidates.append((port, host, interface))
+            choose(final: false)
+        }
+
+        /// `final` is the overall timeout: use what there is rather than nothing.
+        func choose(final: Bool) {
+            guard port == nil, !finished else { return }
+            let waited = final ? .infinity : Date().timeIntervalSince(firstResultAt ?? Date())
+            let decision = RemotePairingChoice.choose(interfaces: candidates.map { [$0.interface] }, waited: waited)
+            switch decision {
+            case .none:
+                return
+            case .wait:
+                guard !waitScheduled, let queue else { return }
+                waitScheduled = true
+                queue.asyncAfter(deadline: .now() + RemotePairingChoice.loopbackWait) { [self] in choose(final: false) }
+            case .loopback(let index):
+                take(index, note: "loopback interface \(candidates[index].interface)")
+            case .fallback(let index):
+                take(index, note: "\(candidates[index].interface), no loopback result within \(RemotePairingChoice.loopbackWait)s")
+            }
+        }
+
+        private func take(_ index: Int, note: String) {
+            port = candidates[index].port
+            host = candidates[index].host
+            chosenNote = note
             done.signal()
         }
     }
@@ -89,7 +120,7 @@ enum RSDPortResolver {
         DNSServiceSetDispatchQueue(resolveRef, queue)
     }
 
-    private static let resolveCallback: DNSServiceResolveReply = { _, _, _, error, _, host, port, _, _, context in
+    private static let resolveCallback: DNSServiceResolveReply = { _, _, interface, error, _, host, port, _, _, context in
         guard let context else { return }
         let state = Unmanaged<State>.fromOpaque(context).takeUnretainedValue()
         guard error == kDNSServiceErr_NoError else {
@@ -99,7 +130,9 @@ enum RSDPortResolver {
         // The port arrives in network byte order.
         let value = UInt16(bigEndian: port)
         guard value != 0 else { return }
-        state.finish(port: value, host: host.map { String(cString: $0) } ?? "?")
+        var nameBuffer = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
+        let interfaceName = if_indextoname(interface, &nameBuffer).map { String(cString: $0) } ?? "if\(interface)"
+        state.add(port: value, host: host.map { String(cString: $0) } ?? "?", interface: interfaceName)
     }
 
     private static func describe(_ error: DNSServiceErrorType) -> String {

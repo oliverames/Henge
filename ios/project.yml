@@ -41,6 +41,8 @@ targets:
         buildPhase: resources
       # The messages the app and its JIT helper exchange.
       - path: HengeJITHelper/HengeJITMessages.swift
+      # Which RemotePairing result is this device's own.
+      - path: HengeJITHelper/RemotePairingChoice.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(HENGE_BUNDLE_IDENTIFIER)
