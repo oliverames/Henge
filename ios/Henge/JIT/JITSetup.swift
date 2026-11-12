@@ -554,22 +554,49 @@ enum LocalDevVPN {
 
     static var isInstalled: Bool { UIApplication.shared.canOpenURL(URL(string: "localdevvpn://")!) }
 
-    /// Whether its tunnel is up: a tunnel interface that is up with an address in 10.7.0.0/16 (LocalDevVPN's own is
-    /// 10.7.1.1), the network it routes to reach this device at 10.7.0.1, StikJIT's default device address.
+    /// Whether connections to 10.7.0.1, StikJIT's default device address, go through LocalDevVPN's tunnel right now.
+    /// Asks the kernel's routing, not the interface list: a UDP socket connected to that address (which sends nothing)
+    /// gets the local address of the route's interface, and that interface must be a tunnel (utun). A tunnel that is up
+    /// while iOS routes the address elsewhere, over cellular say, counts as not connected.
     static var isConnected: Bool {
+        guard let local = localAddressRouting(to: "10.7.0.1") else { return false }
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let first = list else { return false }
         defer { freeifaddrs(list) }
         for p in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let ifa = p.pointee
-            guard (ifa.ifa_flags & UInt32(IFF_UP)) != 0, let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
-            let ip = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { UInt32(bigEndian: $0.pointee.sin_addr.s_addr) }
-            if ip >> 16 == 0x0a07, String(cString: ifa.ifa_name).hasPrefix("utun") {
-                HengeLog.log("jit", "LocalDevVPN tunnel on \(String(cString: ifa.ifa_name))")
-                return true
-            }
+            guard let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let ip = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr }
+            guard ip == local else { continue }
+            let name = String(cString: ifa.ifa_name)
+            HengeLog.log("jit", "10.7.0.1 routes through \(name)")
+            return name.hasPrefix("utun")
         }
         return false
+    }
+
+    /// The local IPv4 address the kernel would send from to reach `address`, or nil when there is no route.
+    private static func localAddressRouting(to address: String) -> in_addr_t? {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var remote = sockaddr_in()
+        remote.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        remote.sin_family = sa_family_t(AF_INET)
+        remote.sin_port = UInt16(49152).bigEndian
+        guard inet_pton(AF_INET, address, &remote.sin_addr) == 1 else { return nil }
+        let connected = withUnsafePointer(to: &remote) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+        var local = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &local) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        }
+        return named == 0 ? local.sin_addr.s_addr : nil
     }
     static var actionTitle: String { isInstalled ? "Connect LocalDevVPN" : "Get LocalDevVPN" }
 
