@@ -589,6 +589,17 @@ HENGE_EXPORT bool henge_ios_jit_prewarm(size_t bytes)
 }
 
 /*
+ * A debugger attached after a prewarm that went unanswered (LiveContainer's launch with JIT can leave Henge marked as
+ * debugged by an attach that answers no brk; StikDebug then attaches for real). Allows one more prewarm. The caller
+ * checks that a debugger traces the process now: the failed probe went to Henge's own trap handler, so nothing traced
+ * it then, and trapping again with nothing attached only fails the same way.
+ */
+HENGE_EXPORT void henge_ios_jit_prewarm_allow_retry(void)
+{
+    if (!henge_prewarmed.rw_addr) henge_prewarm_done = false;
+}
+
+/*
  * Before iOS 26, without a trap: the region made by this process itself (MAP_JIT, or plain memory where the process is marked as
  * debugged or the jailbreak allows invalid pages). For TrollStore's and Dopamine's attach, which answers no brk (#148).
  */
@@ -1000,6 +1011,7 @@ HengeDualMapping henge_ios_jit_allocate(size_t bytes)
 }
 int henge_ios_take_high_room(void **base, size_t *bytes) { (void)base, (void)bytes; return 0; }
 bool henge_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
+void henge_ios_jit_prewarm_allow_retry(void) {}
 bool henge_ios_jit_prewarm_self(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_reserve_bottom(size_t end) { (void)end; return true; }
 void henge_ios_jit_release(HengeDualMapping *m) { (void)m; }

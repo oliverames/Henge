@@ -91,6 +91,15 @@ enum JITBootstrap {
     @discardableResult
     static func prewarm() -> Bool {
         if prewarmed { return true }
+        // A trap prewarm that went unanswered is final unless a debugger has attached since. Its probe went to Henge's
+        // own trap handler, so nothing traced the process then; one tracing it now is a new attach, such as StikDebug's
+        // after LiveContainer launched Henge with an attach that answers no brk (#47).
+        if trapPrewarmFailed {
+            guard isTraced else { return false }
+            HengeLog.log("jit", "a debugger attached after the unanswered prewarm; trying the JIT region again")
+            trapPrewarmFailed = false
+            henge_ios_jit_prewarm_allow_retry()
+        }
         // Before iOS 26 Henge can make the region itself where the device allows it (a jailbreak,
         // a debugger that attached and let go such as TrollStore's enable-jit, or dynamic-codesigning),
         // so it does not wait for CS_DEBUGGED there if jailbroken: Dopamine hides that flag from apps unless
@@ -128,6 +137,7 @@ enum JITBootstrap {
                          + "before the guest download -- StikDebug does not stay attached")
         prepareCompressedHeap()
         let ok = henge_ios_jit_prewarm(jitBytes)
+        trapPrewarmFailed = !ok
         if !ok { releaseUnusedCompressedHeap() }
         if ok {
             prewarmed = true
@@ -145,10 +155,11 @@ enum JITBootstrap {
             lastFailure = "The debugger is attached but is not answering trap "
                         + "requests, and this device will not execute a MAP_JIT "
                         + "mapping either, so no executable memory could be "
-                        + "claimed. This happens when Henge was opened from StikDebug's "
-                        + "app list, which attaches without Henge's script: open Henge "
-                        + "from the Home Screen and tap Turn On JIT. It also happens "
-                        + "inside another container app."
+                        + "claimed. " + (LiveContainerHost.isHosting
+                            ? "LiveContainer launched Henge with an attach that has no Henge script. Tap Turn On JIT, "
+                              + "or choose Henge's JIT script as its launch script in LiveContainer."
+                            : "This happens when Henge was opened from StikDebug's app list, which attaches without "
+                              + "Henge's script: open Henge from the Home Screen and tap Turn On JIT.")
         }
         HengeLog.log("jit", ok ? "JIT region secured; it will be handed to QEMU later"
                               : "JIT prewarm FAILED -- StikDebug is not servicing traps")
@@ -173,6 +184,18 @@ enum JITBootstrap {
     private static var stikDebugMayServiceTraps: Bool {
         let method = UserDefaults.standard.string(forKey: "henge.jitMethod") ?? JITMethod.automatic.rawValue
         return method == JITMethod.stikDebug.rawValue || (method == JITMethod.automatic.rawValue && isStikDebugInstalled)
+    }
+
+    /// The last trap prewarm went unanswered. See prewarm().
+    nonisolated(unsafe) static private var trapPrewarmFailed = false
+
+    /// Whether a debugger that can give Henge its JIT region is there: the region is held already, or the process is
+    /// marked as debugged and, where TXM needs a debugger to answer traps, one traces it now. CS_DEBUGGED alone stays set
+    /// after a debugger lets go, so on a TXM device it cannot tell a new attach from an old one.
+    static var debuggerUsable: Bool {
+        if prewarmed || isLive { return true }
+        guard debuggedFlag else { return false }
+        return !deviceEnforcesTXM || isTraced
     }
 
     /// The one try at making the region without a debugger has been made (it is not repeated: the answer will not change).
@@ -353,6 +376,15 @@ enum JITBootstrap {
     static var canGrantOwnJIT: Bool {
         if #available(iOS 26, *) { return false }
         return true
+    }
+
+    /// henge-jit.js saved as a file to share, for a launcher that runs a script it is given at launch (LiveContainer's
+    /// per-app JIT script). nil when the script is missing from the bundle.
+    static var scriptFileURL: URL? {
+        guard let script = loadScript() else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("henge-jit.js")
+        do { try script.write(to: url, atomically: true, encoding: .utf8) } catch { return nil }
+        return url
     }
 
     /// henge-jit.js as standard base64, which Built-in StikJIT's custom script takes.
