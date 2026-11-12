@@ -33,6 +33,9 @@ struct SessionView: View {
     @State private var showDetails = false
     @State private var controlsHidden = false
     @State private var showRevealHint = false
+    /// The pill tucked into a small handle at the top, off the Mac's menu bar, a few seconds after it was last used.
+    @State private var pillTucked = false
+    @State private var pillTuck: Task<Void, Never>?
     @State private var pointerRefused = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
     @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
@@ -148,6 +151,7 @@ struct SessionView: View {
             .animation(.easeInOut(duration: 0.25), value: zoomed)
             .animation(.easeInOut(duration: 0.25), value: typing)
             .animation(.easeInOut(duration: 0.25), value: controlsHidden)
+            .animation(.easeInOut(duration: 0.25), value: pillTucked)
             .animation(.easeInOut(duration: 0.25), value: showRevealHint)
             .animation(.easeInOut(duration: 0.25), value: showWallpaperTip)
             .onReceive(NotificationCenter.default.publisher(for: UIPointerLockState.didChangeNotification)) { _ in
@@ -398,8 +402,40 @@ struct SessionView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showRevealHint = false }
     }
 
+    /// What is left of the pill when it is tucked: a short bar at the top edge, brought back by a tap or a pull down.
+    private var pillHandle: some View {
+        Capsule().fill(Color.white.opacity(0.75))
+            .frame(width: 44, height: 5)
+            .shadow(color: .black.opacity(0.5), radius: 2)
+            .frame(width: 120, height: 22)
+            .contentShape(Rectangle())
+            .onTapGesture { untuckPill() }
+            .gesture(DragGesture(minimumDistance: 6).onEnded { if $0.translation.height > 0 { untuckPill() } })
+            .accessibilityElement()
+            .accessibilityLabel("Show controls")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { untuckPill() }
+            .transition(.opacity)
+    }
+
+    private func untuckPill() {
+        pillTucked = false
+        tuckPillLater()
+    }
+
+    /// Tucks the pill away once it has gone unused a few seconds (VoiceOver keeps it out).
+    private func tuckPillLater() {
+        pillTuck?.cancel()
+        guard !UIAccessibility.isVoiceOverRunning else { return }
+        pillTuck = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled, !showDetails, !confirmStop else { return }
+            pillTucked = true
+        }
+    }
+
     private func tool(_ symbol: String, _ label: String, tint: Color = Desk.text, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button(action: { action(); if !pillTucked { tuckPillLater() } }) {
             Image(systemName: symbol)
                 .font(.system(size: 19, weight: .medium))
                 .foregroundStyle(tint)
@@ -426,12 +462,18 @@ struct SessionView: View {
         .padding(.horizontal, 8)
         .frame(height: 50)
         .deskGlass(in: Capsule())
+        // Over the Mac's menu bar (on its side, no room beside the screen) the pill tucks away to a handle when idle.
+        let overMac = layout.barY == nil && landscape && !typing
         if controlsHidden {
             EmptyView()
         } else if let barY = layout.barY {
             pill.position(x: layout.touch.midX, y: barY)
+        } else if overMac && pillTucked {
+            pillHandle.position(x: layout.touch.midX, y: layout.insets.top + 11)
         } else if landscape || typing {
             pill.position(x: layout.touch.midX, y: top + 25)
+                .onAppear { if overMac { tuckPillLater() } }
+                .onChange(of: overMac) { if $0 { tuckPillLater() } }
         } else {
             pill.position(x: layout.touch.midX, y: layout.touch.height - layout.insets.bottom - 34)
         }
