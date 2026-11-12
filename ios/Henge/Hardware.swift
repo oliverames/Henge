@@ -195,6 +195,7 @@ enum PointerLock {
 enum PhonePointer {
     private static var original: IMP?
     private(set) static var status = "not run"
+    private static var logged = 0
 
     static func install() {
         guard !Device.isPad, original == nil else { return }
@@ -208,8 +209,15 @@ enum PhonePointer {
         let replacement: @convention(block) (AnyObject) -> Void = { object in
             if let original { unsafeBitCast(original, to: Update.self)(object, selector) }
             guard let interaction = object as? UIPointerInteraction, interaction.isEnabled, let view = interaction.view else { return }
-            for driver in drivers(of: interaction) where driver.responds(to: NSSelectorFromString("setView:")) {
+            let list = drivers(of: interaction)
+            var attached = 0
+            for driver in list where driver.responds(to: NSSelectorFromString("setView:")) {
                 driver.setValue(view, forKey: "view")
+                attached += 1
+            }
+            if logged < 8 {
+                logged += 1
+                HengeLog.log("input", "phone pointer: \(attached) of \(list.count) drivers (\(list.map { String(describing: type(of: $0)) })) attached to \(type(of: view))")
             }
         }
         original = method_setImplementation(method, imp_implementationWithBlock(replacement))
