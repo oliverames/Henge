@@ -195,11 +195,14 @@ struct SessionView: View {
         }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
+            MacShortcuts.setMacOnScreen(true)
+            HengeAudio.shared.activate()
             HardwareMouse.shared.start()
             VolumeClicks.shared.start()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
+            MacShortcuts.setMacOnScreen(false)
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()

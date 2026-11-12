@@ -94,6 +94,15 @@ void hv_vm_mouse_move(int dx, int dy);
 void hv_vm_mouse_button(int button, int down); /* 0 left, 1 right, 2 middle */
 void hv_vm_mouse_wheel(int dy);
 void hv_vm_mouse_hwheel(int dx);
+/* A mouse held to the host, through the USB mouse: real buttons (bit 0 primary, 1 secondary,
+   2 middle, 3 back, 4 forward) and wheel detents (positive: away from the user, and right). */
+/* Any thread: the host's audio came back (an interruption ended, the output changed); a playing
+   stream gets a new host player. */
+void hv_vm_audio_kick(void);
+int hv_vm_usb_mouse_ready(void); /* the guest reads it: until then use hv_vm_mouse_* */
+void hv_vm_usb_mouse_move(int dx, int dy);
+void hv_vm_usb_mouse_scroll(int wheel, int pan);
+void hv_vm_usb_mouse_buttons(unsigned buttons);
 /* The Magic Trackpad 2 on the USB bus: a finger on it. phase: 0 down, 1 move, 2 up; id a
    stable 1..15 per touch; x, y in sensor units (HV_TP_SENSOR_* in devices/xhci.h).
    ts_ms is the touch sample's own clock in ms (see hv_xhci_touch). */
