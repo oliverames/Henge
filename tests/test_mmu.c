@@ -9,7 +9,7 @@
 #include "sysreg.h"
 
 #define PT_PA 0x80000000ull
-#define PT_SIZE (1u << 20)
+#define PT_SIZE (1u << 21)
 
 static uint8_t *pt;
 static uint64_t pt_next;
@@ -477,6 +477,47 @@ int main(void) {
             }
         }
         hv_knob[HV_K_WALKLOG] = 1;
+    }
+
+    /* HV_SHARED_KEEP: a process switch keeps user entries live in a 32 MB chunk that both address spaces reach through
+       the same level 2 entry (xnu's nested shared region), and only there. 16 KB granule, 47-bit user VAs. */
+    {
+        static HvCpu c4;
+        hv_cpu_reset_index(&c4, &m, 2);
+        c4.sctlr_el1 = 1, c4.mair_el1 = 0x00ff;
+        c4.tcr_el1 = 17 | 2u << 14 | 25u << 16 | 1u << 30 | 1u << 23 | 5ull << 32;
+        uint64_t ra = alloc_table(), rb = alloc_table();
+        const uint64_t leaf = PT_PA + PT_SIZE - 0x4000; /* RAM, so the TLB takes it */
+        const uint64_t shared = 0x180004000ull, other = 0x182004000ull, priv = 0x100004000ull;
+        map(ra, 14, 47, shared, 3, leaf | PAGE | AF | AP(1), 0);
+        map(ra, 14, 47, other, 3, leaf | PAGE | AF | AP(1), 0);
+        map(ra, 14, 47, priv, 3, leaf | PAGE | AF | AP(1), 0);
+        map(rb, 14, 47, other, 3, leaf | PAGE | AF | AP(1), 0); /* the same page, through B's own level 3 table */
+        map(rb, 14, 47, priv, 3, leaf | PAGE | AF | AP(1), 0);
+        /* B's level 2 entry for the shared chunk: a copy of A's, so the same level 3 table */
+        uint64_t l2a = host(ra)[0] & 0x0000ffffffffc000ull, l2b = host(rb)[0] & 0x0000ffffffffc000ull;
+        host(l2b)[shared >> 25] = host(l2a)[shared >> 25];
+        const uint64_t A = 1ull << 48 | ra, B = 2ull << 48 | rb;
+        const uint64_t vas[3] = {shared, other, priv};
+        for (int knob = 1; knob >= 0; knob--) {
+            hv_knob[HV_K_SHAREDKEEP] = knob;
+            c4.ttbr0_el1 = A;
+            hv_tlb_flush(&c4);
+            for (int k = 0; k < 3; k++) hv_mmu_access(&c4, vas[k], HV_ACC_READ, 0, &pa);
+            c4.ttbr0_el1 = B;
+            hv_tlb_switch_user(&c4, A, B);
+            for (int k = 0; k < 3; k++) {
+                int live = hv_tlb_ent(&c4, (vas[k] >> 14) & (HV_TLB_SIZE - 1), 0)->read_tag == vas[k] - HV_TLB_ADJ;
+                checks++;
+                if (live != (knob && k == 0)) printf("  FAIL shared keep %d, va %llx: %s\n", knob, (unsigned long long)vas[k], live ? "live" : "dropped"), failures++;
+            }
+            /* a kept entry is still on the list a later flush goes by */
+            hv_tlb_flush_user(&c4);
+            checks++;
+            if (hv_tlb_ent(&c4, (shared >> 14) & (HV_TLB_SIZE - 1), 0)->read_tag != HV_TLB_INVALID) printf("  FAIL shared keep %d: a flush left the kept entry\n", knob), failures++;
+            for (int i = 0; i < HV_STASHES; i++) c4.pc_state->stash[i].ttbr0 = 0;
+        }
+        hv_knob[HV_K_SHAREDKEEP] = 0;
     }
 
     printf("%d checks, %d failures\n", checks, failures);
