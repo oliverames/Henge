@@ -23,7 +23,8 @@ import UIKit
 ///   screen W H         act as if the device's space for the Mac were W x H points (a rotation, a fold or unfold),
 ///                      so a Mac that follows its space is asked for that size; "screen off" goes back to the real one
 ///   check [NAME]       what the device's panel shows: the Mac's screen where the layout puts it, cut by the panel's
-///                      rounded corners, with the pointer at the size Henge draws it, into Documents/NAME.png
+///                      rounded corners, with the pointer at the size Henge draws it and Henge's own controls
+///                      over it, into Documents/NAME.png (the controls alone in NAME-ui.png)
 ///                      (check.png), and the sizes, corners and pointer into the log
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
@@ -226,16 +227,32 @@ enum Autopilot {
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
         format.opaque = true
+        // Henge's own controls, as UIKit draws the window: the Mac's layer comes out black there (it is Metal), so the
+        // window is laid over the Mac's screen with "lighten", which keeps the Mac where the window is black. Also
+        // saved alone as NAME-ui.png, where a device screenshot comes back black.
+        let window = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows).first { $0.isKeyWindow }
+        let ui = window.map { w in
+            UIGraphicsImageRenderer(size: w.bounds.size, format: format).image { _ in
+                _ = w.drawHierarchy(in: w.bounds, afterScreenUpdates: false)
+            }
+        }
         let png = UIGraphicsImageRenderer(size: full, format: format).pngData { ctx in
             UIColor.black.setFill()
             ctx.fill(CGRect(origin: .zero, size: full))
             UIBezierPath(roundedRect: CGRect(origin: .zero, size: full), cornerRadius: radius).addClip()
             UIImage(cgImage: image).draw(in: picture)
             if let pointer { pointer.image.draw(in: pointer.rect) }
+            ui?.draw(in: CGRect(origin: .zero, size: full), blendMode: .lighten, alpha: 1)
         }
         let url = docs.appendingPathComponent("\(name).png")
         if (try? png.write(to: url, options: .atomic)) != nil {
             HengeLog.log("check", "\(url.lastPathComponent), \(png.count / 1024) KB")
+        }
+        if let data = ui?.pngData(), (try? data.write(to: docs.appendingPathComponent("\(name)-ui.png"), options: .atomic)) != nil {
+            HengeLog.log("check", "\(name)-ui.png: Henge's controls alone")
+        } else {
+            HengeLog.log("check", "no window to draw Henge's controls from")
         }
     }
 
