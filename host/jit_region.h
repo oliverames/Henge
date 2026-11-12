@@ -51,6 +51,9 @@ void hv_jit_finish2(HvJitRegion *region, uint32_t *a, size_t na, uint32_t *b, si
    branch takes the way the old one went (chaining: the exit's stub, which follows the slot) until its cache lets go. */
 void hv_jit_finish_branch(HvJitRegion *region, uint32_t *word);
 
+/* Debugging (HV_JIT_POISON): zero `words` instructions at start (an executable address), so running them faults. */
+void hv_jit_poison(HvJitRegion *region, uint32_t *start, size_t words);
+
 /* Space for `words` instructions, or NULL when the region is full. */
 uint32_t *hv_jit_reserve(HvJitRegion *region, size_t words);
 /* Back to empty (and the ring, if any, to its first segment). */

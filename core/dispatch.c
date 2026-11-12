@@ -15,6 +15,12 @@
 #include "sysreg.h"
 #include "translate.h"
 
+static int poison_on(void) {
+    static int poison = -1;
+    if (poison < 0) poison = getenv("HV_JIT_POISON") != NULL;
+    return poison;
+}
+
 void hv_flush_blocks(HvMachine *m) {
     /* Every other CPU is parked (stop_the_world): the one moment the TLB layout can change. */
     if ((hv_knob[HV_K_TLBT] != 0) != hv_tlb_tmajor) {
@@ -45,15 +51,8 @@ void hv_flush_blocks(HvMachine *m) {
     m->jit.limit = hv_knob[HV_K_JITCAP] > 0 ? ((size_t)hv_knob[HV_K_JITCAP] << 20) / sizeof(uint32_t) : 0; /* MB of it to use (testing) */
     hv_jit_ring(&m->jit, hv_knob[HV_K_JITSEGS] ? (uint32_t)hv_knob[HV_K_JITSEGS] : 8); /* after the limit: segments of what is used */
     /* HV_JIT_POISON: nothing old is left to run, so a stale pointer faults where it is used. */
-    static int poison = -1;
-    if (poison < 0) poison = getenv("HV_JIT_POISON") != NULL;
-    m->gen_checks = poison;
-    if (poison) {
-        size_t bytes = (size_t)m->jit.capacity * 4;
-        uint32_t *rw = (uint32_t *)((uint8_t *)m->jit.base + m->jit.rw_diff);
-        for (size_t i = 0; i < bytes / 4; i++) rw[i] = 0;
-        hv_jit_finish(&m->jit, m->jit.base, m->jit.capacity);
-    }
+    m->gen_checks = poison_on();
+    if (m->gen_checks) hv_jit_poison(&m->jit, m->jit.base, m->jit.capacity);
 }
 
 /* The code cache as a ring: when it fills, only the oldest segment's blocks go, not every block. A full flush made
@@ -152,6 +151,10 @@ void hv_evict_blocks(HvMachine *m) {
     m->nslot_free = nfree;
     m->slot_take = 0;
     hv_jit_finish2(r, NULL, 0, NULL, 0); /* the barrier after the lines (DSB, ISB) */
+    if (poison_on()) { /* HV_JIT_POISON: anything still leading into the segment faults there */
+        m->gen_checks = 1;
+        hv_jit_poison(r, (uint32_t *)lo, r->seg_words);
+    }
 #undef GONE
     m->stats.evict_ticks += mach_absolute_time() - t0;
 }
