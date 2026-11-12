@@ -253,12 +253,14 @@ final class HardwareMouse {
             HengeLog.log("input", "pointer lock: \(locked ? "on" : "off")")
         })
         PointerLock.set(true)
+        if !Device.isPad { VendorMice.shared.start() } // an iPhone passes on no mouse without AssistiveTouch
     }
 
     func stop() {
         guard started else { return }
         started = false
         PointerLock.set(false)
+        if !Device.isPad { VendorMice.shared.stop() }
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         for mouse in mice {
@@ -302,7 +304,6 @@ final class HardwareMouse {
             extra.pressedChangedHandler = { [weak self] _, _, pressed in self?.sideButton(UInt32(3 + i), pressed) }
         }
         input.scroll.valueChangedHandler = { [weak self] _, first, second in self?.scrolled(first, second) }
-        if !Device.isPad { MouseBluetoothProbe.shared.run() } // what an iPhone lets an app reach of it
         // Whether GameController delivers anything for this mouse: an iPhone announces a mouse it may never pass on.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak mouse] in
             guard let self, let mouse else { return }
@@ -318,6 +319,42 @@ final class HardwareMouse {
                 guard let input = mouse?.mouseInput else { return }
                 let pressed = [input.leftButton, input.rightButton, input.middleButton].compactMap { $0 }.map { $0.isPressed ? "1" : "0" }.joined()
                 HengeLog.log("input", "mouse poll \(second) s: buttons \(pressed), scroll \(input.scroll.xAxis.value), \(input.scroll.yAxis.value)")
+            }
+        }
+    }
+
+    // MARK: A mouse read through its maker's own channel (VendorMice), on any thread
+
+    /// Raw sensor counts, Y down, unscaled: the Mac's USB mouse gets what a real Mac would, and macOS sets the feel.
+    func vendorMoved(_ dx: Int32, _ dy: Int32) {
+        queue.async { [self] in
+            if movesLogged < 8 || movesLogged % 500 == 0 { HengeLog.log("input", "vendor mouse moved \(dx), \(dy) (#\(movesLogged + 1))") }
+            movesLogged += 1
+            if usbRoute() { henge_vm_usb_mouse_move(dx, dy) } else { henge_vm_mouse_move(dx, dy) }
+        }
+    }
+
+    /// The USB mouse's button bits: 0 left, 1 right, 2 middle, 3 back, 4 forward.
+    func vendorButton(_ bit: UInt32, _ pressed: Bool) {
+        queue.async { [self] in
+            if bit < 3 { button(Int32(bit), pressed) } else { sideButton(bit, pressed) }
+        }
+    }
+
+    /// Whole wheel detents, positive away from the user (wheel) and to the right (pan).
+    func vendorScrolled(wheel: Int32, pan: Int32) {
+        queue.async { [self] in
+            let way: Int32 = reverse ? -1 : 1
+            if scrollsLogged < 24 {
+                scrollsLogged += 1
+                HengeLog.log("input", "vendor scroll: wheel \(wheel), pan \(pan)")
+            }
+            if usbRoute() {
+                henge_vm_usb_mouse_scroll(max(-16, min(16, wheel * way)), max(-16, min(16, pan * way)))
+            } else {
+                let scale = Float(UserDefaults.standard.object(forKey: Self.scrollSpeedKey) == nil ? 0.3 : UserDefaults.standard.double(forKey: Self.scrollSpeedKey))
+                let units = { (n: Int32) in way * n.signum() * Self.wheelUnits(Float(abs(n)), scale: scale) }
+                henge_vm_mouse_scroll(units(pan), units(wheel))
             }
         }
     }
