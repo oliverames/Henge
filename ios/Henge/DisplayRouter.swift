@@ -22,6 +22,19 @@ final class DisplayRouter: ObservableObject {
 
     struct Size: Equatable { var width: Int, height: Int }
 
+    /// The router of the Mac on screen, for the autopilot's display tests.
+    static weak var current: DisplayRouter?
+    /// A test's stand-in for the device's own space (autopilot "screen W H"): asked for in place of what the device's
+    /// layout wants, so a rotation or a fold can be tested with nobody holding the phone. Nil: the real layout.
+    var simulated: Size? { didSet { follow() } }
+    /// Where the Mac's picture is on the device, in points from its top left, and the device's whole size: what the
+    /// autopilot's "check" draws the Mac's screen into, with the panel's corners.
+    var picture: CGRect = .zero
+    var full: CGSize = .zero
+    var isRetina: Bool { retina }
+    /// The size asked of macOS last.
+    var requested: Size? { asked }
+
     private var targets = DisplayTargetSelection()
     private var layers: [UUID: CAMetalLayer] = [:]
     private var selected: UUID?
@@ -46,6 +59,7 @@ final class DisplayRouter: ObservableObject {
         asked = self.screen
         self.follows = follows
         running = false
+        Self.current = self
     }
 
     /// macOS is up (or stopped): from now on a new size goes to it as it changes.
@@ -82,7 +96,7 @@ final class DisplayRouter: ObservableObject {
         guard follows, running else { return }
         let device: UUID? = nil
         // On an external display, its size only: until it says, the Mac keeps what it has.
-        let size = targets.isExternal ? selected.flatMap { wanted[$0] } : wanted[device]
+        let size = targets.isExternal ? selected.flatMap { wanted[$0] } : simulated ?? wanted[device]
         pending?.cancel() // a size asked for a moment ago and not wanted now
         guard let size, size != asked else { return }
         pending = Task { [weak self] in
