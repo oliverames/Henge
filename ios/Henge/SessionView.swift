@@ -701,7 +701,10 @@ struct SessionView: View {
         // What the guest's display driver answers when macOS asks whether this is a built-in panel: only a
         // built-in display gets macOS's panel artwork (rounded corners, insets), so a Mac shown on a monitor
         // answers external there. It is read once per guest boot: moving the Mac between screens needs a boot.
-        EngineTuning.session["HV_PVG_EXTERNAL"] = display.isExternal ? "1" : "0"
+        let docked = UIApplication.shared.connectedScenes.contains {
+            ($0 as? UIWindowScene)?.session.role == .windowExternalDisplayNonInteractive
+        } || UIScreen.screens.count > 1 || display.isExternal
+        EngineTuning.session["HV_PVG_EXTERNAL"] = docked ? "1" : "0"
         EngineTuning.apply()
         henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
         if mac.isRetina {
