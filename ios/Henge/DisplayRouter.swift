@@ -34,6 +34,14 @@ final class DisplayRouter: ObservableObject {
     var isRetina: Bool { retina }
     /// The size asked of macOS last.
     var requested: Size? { asked }
+    /// The external display's own density, in pixels per mm, once a surface on it has read the panel's
+    /// shape (ExternalMacDisplay). Nil until then; an external display without a figure keeps the 1x default.
+    var externalDensity: Float?
+    /// Gives the router the external display's density: its panel's pixels over its physical size.
+    func setExternalDensity(_ pxmm: Float?) {
+        externalDensity = pxmm
+        follow()
+    }
 
     private var targets = DisplayTargetSelection()
     private var layers: [UUID: CAMetalLayer] = [:]
@@ -103,9 +111,12 @@ final class DisplayRouter: ObservableObject {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard let self, !Task.isCancelled else { return }
             self.asked = size
-            // A Retina Mac keeps its panel's density on the device's own screen; an external display gets the
-            // default (1x), as macOS would pick for a desk monitor whose size it cannot know.
-            let density: Float = self.retina && !self.targets.isExternal ? Float(Device.retinaPPI / 25.4) : 0
+            // A Retina Mac keeps its panel's density on the device's own screen. An external display reports its
+            // own panel's density (read off its screen by the surface): macOS then treats it as the HiDPI panel it
+            // is, and offers the scaled modes a real Mac gets on it. No figure, no panel shape known: 1x.
+            let density: Float = self.targets.isExternal
+                ? (self.externalDensity ?? 0)
+                : (self.retina ? Float(Device.retinaPPI / 25.4) : 0)
             HengeLog.log("display", "asking macOS for \(size.width)x\(size.height), \(density) px/mm")
             henge_vm_set_display_live(UInt32(size.width), UInt32(size.height), density)
             // The layout takes the new shape when macOS does, so the picture is never stretched or squeezed.
@@ -154,11 +165,13 @@ extension DisplayRouter.Size {
         return Self(width: max(Int((1440 * shape / 8).rounded()) * 8, 800), height: 1440)
     }
 
-    /// An external display: its own pixels, up to 2560 x 1600 (larger costs the emulated Mac more than it gives).
+    /// An external display: the panel's own pixels. macOS scales down from them (a 4K panel's default is
+    /// 1920x1080 at 2x), so the guest renders the panel's real resolution and text is sharp, like on a real
+    /// Mac at a monitor. Capped at 4096 x 4096 so a 5K+ panel still works at a cost, not a failure.
     static func external(_ points: CGSize, scale: CGFloat) -> Self? {
         guard points.width >= 100, points.height >= 100 else { return nil }
         let px = CGSize(width: points.width * scale, height: points.height * scale)
-        let down = min(1, 2560 / px.width, 1600 / px.height)
+        let down = min(1, 4096 / px.width, 4096 / px.height)
         return Self(width: Int(px.width * down) / 8 * 8, height: Int(px.height * down) / 8 * 8)
     }
 }

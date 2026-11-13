@@ -9,6 +9,11 @@ enum EngineTuning {
     static let wfiSpinKey = "henge.perf.wfiSpin"
     static let fastFlushKey = "henge.perf.fastFlush"
 
+    /// Set by the session right before a Mac starts: settings that describe where the Mac is shown
+    /// (the guest display answers as an external monitor there, so macOS draws no panel corners or
+    /// insets on it). Applied like the defaults, before henge-env.txt, which still wins over them.
+    static var session: [String: String] = [:]
+
     static let defaults: [String: String] = [
         // 60, not 120: every frame macOS draws is emulated and replayed, so 120 Hz
         // halves the CPU left for apps for animation few will notice.
@@ -20,6 +25,7 @@ enum EngineTuning {
 
     static func apply() {
         var env = defaults
+        for (k, v) in session { env[k] = v } // where the Mac is shown: decided by the session, not these defaults
         let d = UserDefaults.standard
         if [30, 120].contains(d.integer(forKey: refreshKey)) { env["HV_HZ"] = String(d.integer(forKey: refreshKey)) }
         if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }

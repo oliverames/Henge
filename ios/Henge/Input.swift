@@ -10,6 +10,12 @@ struct KeyboardCatcher: UIViewRepresentable {
 
     func makeUIView(context: Context) -> Holder { Holder() }
 
+    /// After a lock, a call or the app switcher, iOS has stopped the session's views being first
+    /// responder, and with them the route a hardware keyboard's keys take to the Mac. Take it back.
+    static func reattach() {
+        DispatchQueue.main.async { Holder.current?.takeKeyboard() }
+    }
+
     func updateUIView(_ view: Holder, context: Context) {
         view.typer.onHide = { active = false }
         view.typing = active
@@ -21,11 +27,14 @@ struct KeyboardCatcher: UIViewRepresentable {
         let typer = CatcherView()
         var typing = false
         private var hiding: NSObjectProtocol?
+        /// The session's holder, while it is in a window: the one that can take the keyboard back.
+        static weak var current: Holder?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
             addSubview(listener)
             addSubview(typer)
+            Self.current = self
             hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
                                                             object: nil, queue: .main) { [weak self] _ in
                 self?.keyboardHid()

@@ -197,6 +197,9 @@ struct SessionView: View {
         }
         .statusBarHidden(zoomed || Device.isPad)
         .persistentSystemOverlays(.hidden)
+        // A swipe from a screen edge is the Mac's (its Dock, its menu bar) first: macOS gets it, and a
+        // second swipe goes back to iOS's own gestures. Without this iOS takes every edge swipe itself.
+        .defersSystemGestures(on: .all)
         .sheet(isPresented: $showDetails) { details }
         .confirmationDialog("Shut down \(mac.name)?", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("Shut Down", role: .destructive) { finish() }
@@ -211,6 +214,10 @@ struct SessionView: View {
         .onChange(of: scenePhase) { phase in
             guard phase != .active else {
                 display.refresh()
+                // A lock or the app switcher may have taken the mouse and keyboard back: iOS reclaims
+                // both when the session stops being active, and nothing here re-attached them until now.
+                HardwareMouse.shared.start()
+                KeyboardCatcher.reattach()
                 InstantResume.cameBack(mac)
                 return
             }
@@ -691,6 +698,10 @@ struct SessionView: View {
         var buffer = [CChar](repeating: 0, count: 256)
         JITBootstrap.releaseLingeringDebugger()
         Sharing.prepare()
+        // What the guest's display driver answers when macOS asks whether this is a built-in panel: only a
+        // built-in display gets macOS's panel artwork (rounded corners, insets), so a Mac shown on a monitor
+        // answers external there. It is read once per guest boot: moving the Mac between screens needs a boot.
+        EngineTuning.session["HV_PVG_EXTERNAL"] = display.isExternal ? "1" : "0"
         EngineTuning.apply()
         henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
         if mac.isRetina {

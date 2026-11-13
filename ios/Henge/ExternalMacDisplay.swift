@@ -37,6 +37,9 @@ struct ExternalMacDisplay: View {
     private func want(_ size: CGSize, scale: CGFloat? = nil) {
         if let scale { self.scale = scale }
         guard self.scale > 0 else { return }
+        // The panel's density goes with its shape: macOS needs both to treat the monitor as the HiDPI
+        // display it is (iOS reports neither, so the diagonal comes from the app's settings, Device).
+        display.setExternalDensity(Device.externalDensity(points: size, scale: self.scale))
         display.want(DisplayRouter.Size.external(size, scale: self.scale), on: surface)
     }
 }

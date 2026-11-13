@@ -209,7 +209,9 @@ enum Autopilot {
         guard let display = DisplayRouter.current else { HengeLog.log("autopilot", "check: no Mac on screen"); return }
         let mac = macSize(), full = display.full, picture = display.picture
         let scale = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen.scale }.first ?? 3
-        let radius = Device.displayCornerRadius
+        // The panel's corners belong to the phone's own screen: a Mac on an external display has no shape cut
+        // out of it, so its picture is not clipped here either.
+        let radius = display.isExternal ? 0 : Device.displayCornerRadius
         let asked = display.requested.map { "\($0.width)x\($0.height)" } ?? "none"
         let sx = picture.width * scale / CGFloat(mac.width), sy = picture.height * scale / CGFloat(mac.height)
         HengeLog.log("check", "mode \(mac.width)x\(mac.height), asked \(asked), device \(Int(full.width))x\(Int(full.height)) pt at \(Int(scale))x, picture \(Int(picture.minX)),\(Int(picture.minY)) \(Int(picture.width))x\(Int(picture.height)) pt")
