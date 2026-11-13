@@ -26,7 +26,7 @@ struct HomeView: View {
                 VStack(spacing: 14) {
                     notices
                     if let mac {
-                        MacHero(mac: mac, jitReady: jitReady, start: { running = mac }, turnOnJIT: { jit.enable() },
+                        MacHero(mac: mac, jitReady: jitReady, start: { running = Machines.shared.fittedForStart(mac) }, turnOnJIT: { jit.enable() },
                                 jitNote: jitReady ? nil : (JITBootstrap.lastFailure ?? jit.automaticDescription))
                         HStack(spacing: 10) {
                             FactTile(title: "Disk", value: ByteText.string(UInt64(max(mac.bytesUsed, 0))))

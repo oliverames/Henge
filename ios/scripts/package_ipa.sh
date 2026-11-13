@@ -25,6 +25,12 @@ xcodebuild -project Henge.xcodeproj -scheme Henge -configuration Release -sdk ip
 }
 grep -E "BUILD" "$DD.buildlog" || true
 APP="$DD/Build/Products/Release-iphoneos/Henge.app"
+# An iPhone Duo gives its whole inner screen only to apps built with the iOS 27.1 SDK or newer (bars otherwise).
+SDK="$(plutil -extract DTSDKName raw "$APP/Info.plist" 2>/dev/null | sed 's/^iphoneos//')"
+case "$SDK" in
+    ''|*[!0-9.]*) ;;
+    *) [ "$(printf '%s\n27.1\n' "$SDK" | sort -V | head -1)" = "27.1" ] || echo "  note     built with the iOS $SDK SDK: an iPhone Duo will not give Henge its whole inner screen (Xcode 27.1 or later does)" ;;
+esac
 rc=0
 for f in "$APP/Henge" "$APP/henge-jit.js" "$APP/PlugIns/HengeJITHelper.appex/HengeJITHelper" \
          "$APP/Frameworks/StikJIT.framework/StikJIT" "$APP/Frameworks/StikJIT.framework/Info.plist"; do

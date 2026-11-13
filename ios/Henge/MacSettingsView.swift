@@ -72,23 +72,34 @@ struct MacSettingsView: View {
                             case "retina": break
                             case "performance": (mac.screenWidth, mac.screenHeight) = Device.performanceScreen
                             case "wide": (mac.screenWidth, mac.screenHeight) = (1920, 1080)
-                            default: (mac.screenWidth, mac.screenHeight) = Device.fittingScreen
+                            default: (mac.screenWidth, mac.screenHeight) = Device.fitting(for: mac)
                             }
                             save()
                         })) {
-                            if Device.isPad {
-                                Text("Retina").tag("retina")
-                                Text("Performance").tag("performance")
-                            }
+                            if Device.offersRetina { Text("Retina").tag("retina") }
+                            if Device.isPad { Text("Performance").tag("performance") }
                             Text("Fit this \(Device.name)").tag("fit")
                             Text("16:9").tag("wide")
                         }
                         .pickerStyle(.segmented)
-                        Text("\(mac.screen.width) × \(mac.screen.height). \(Device.isPad ? "Performance renders about 30% fewer pixels. " : "")Changes apply the next time this Mac starts.")
+                        if Device.largeScreen {
+                            Toggle("Fill the whole screen", isOn: Binding(get: { mac.fillScreen ?? true }, set: { fill in
+                                mac.fillScreen = fill
+                                if !(mac.screen.width == 1920 && mac.screen.height == 1080) {
+                                    (mac.screenWidth, mac.screenHeight) = Device.fitting(for: mac)
+                                }
+                                save()
+                            }))
+                            Text("Off leaves a strip at the right for the time, battery and Wi-Fi, with Henge's controls under them.")
+                                .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                        }
+                        Text("\(mac.screen.width) × \(mac.screen.height). \(Device.isPad ? "Performance renders about 30% fewer pixels. " : "Fit follows the screen this Mac starts on. ")Changes apply the next time this Mac starts.")
                             .font(.system(size: 13)).foregroundStyle(Desk.dim)
                     }
                     .padding(17)
                     .deskCard()
+                    // A Mac fitted to another screen (an iPhone Duo's other one) shows the size it will start with.
+                    .onAppear { mac = machines.fittedForStart(mac) }
                 }
 
                 DeskHeading("Storage")

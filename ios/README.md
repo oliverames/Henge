@@ -2,7 +2,8 @@
 
 The Henge app on HengeVM's engine. Build: `ios/scripts/package_ipa.sh` (writes
 `~/Desktop/Henge.ipa`; `--trollstore` writes `Henge.tipa`, for TrollStore and
-TrollStore Lite, without the entitlements TrollStore bans). Needs Xcode 27 or later, xcodegen,
+TrollStore Lite, without the entitlements TrollStore bans). Needs Xcode 27 or later (27.1 or later for an
+iPhone Duo: iOS gives its whole inner screen only to apps built with the iOS 27.1 SDK or newer), xcodegen,
 and the prebuilt pieces
 `ios/scripts/fetch_deps.sh` copies from Husk (StikJIT, the pairing library,
 libslirp and glib for iOS). `HENGE_ENTITLEMENTS` picks the app's entitlements file

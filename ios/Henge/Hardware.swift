@@ -7,13 +7,49 @@ enum Device {
     static let isPad = UIDevice.current.userInterfaceIdiom == .pad
     static let name = isPad ? "iPad" : "iPhone"
 
+    /// The screen Henge is on, in points. An iPhone's window is its whole screen, so the window says which one:
+    /// an iPhone Duo has two, and UIScreen.main can be the one Henge is not on (a Mac fitted on the inner screen
+    /// got the outer screen's shape, 1920×1320, and thin bars above and below).
+    static var screenSize: CGSize {
+        if !isPad {
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                .filter { $0.session.role == .windowApplication }
+            if let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first {
+                return scene.coordinateSpace.bounds.size
+            }
+        }
+        return UIScreen.main.bounds.size
+    }
+
     /// A Mac's screen that fills this device on its side: 1920 wide, as tall as the shape asks. iPads and
     /// squarer phones (iPhone Duo, about 1.46:1) would get bars above and below at 16:9. Phones wider
     /// than 16:9 come out at 1920×1080, as before.
-    static var fittingScreen: (width: Int, height: Int) {
-        let size = UIScreen.main.bounds.size
+    static var fittingScreen: (width: Int, height: Int) { fitting(screenSize) }
+
+    /// The same for any space. Squarer than 4:3 (an iPhone Duo's inner screen beside its status strip) is as
+    /// tall as a Mac's screen goes here, 1440, and narrower than 1920 instead.
+    static func fitting(_ size: CGSize) -> (width: Int, height: Int) {
         let shape = max(size.width, size.height) / max(min(size.width, size.height), 1)
-        return (1920, min(max(Int((1920 / shape / 8).rounded()) * 8, 1080), 1440))
+        let height = min(max(Int((1920 / shape / 8).rounded()) * 8, 1080), 1440)
+        return (shape < 4.0 / 3 ? Int((CGFloat(height) * shape / 8).rounded()) * 8 : 1920, height)
+    }
+
+    /// An iPhone's large screen: an unfolded iPhone Duo (951 × 669 points). On its side it keeps its status
+    /// bar, as a column at the top right with the time, battery and Wi-Fi, where a phone's screen hides it.
+    static var largeScreen: Bool { !isPad && min(screenSize.width, screenSize.height) >= 600 }
+    /// What a Mac that does not fill a large screen leaves at the right: room for that column, and Henge's
+    /// controls under it. The column is 53 points wide, 21 from the edge, and ends 102 from the top.
+    static let sideStrip: CGFloat = 84
+    static let sideStripCentre: CGFloat = 47.5
+    static let sideStripTop: CGFloat = 114
+
+    /// The fit for one Mac: all of the screen, or what its side strip leaves.
+    static func fitting(for mac: VirtualMac) -> (width: Int, height: Int) {
+        var size = screenSize
+        if largeScreen, !(mac.fillScreen ?? true) {
+            if size.width >= size.height { size.width -= sideStrip } else { size.height -= sideStrip }
+        }
+        return fitting(size)
     }
 
     /// Preserve the iPad's shape while reducing the virtual GPU's pixel work.
@@ -22,18 +58,37 @@ enum Device {
         return (1600, Int((Double(fit.height) * 5 / 6 / 8).rounded()) * 8)
     }
 
-    /// The panel itself, on its side: every physical pixel, and its real size in mm so that macOS
-    /// sees a Retina density and draws at 2x (looks like half the pixels, sharp as the iPad's own UI).
-    /// Every iPad with an M chip is 264 ppi.
-    static var retinaScreen: (width: Int, height: Int) {
-        let n = UIScreen.main.nativeBounds.size
-        return (Int(max(n.width, n.height)) / 8 * 8, Int(min(n.width, n.height)) / 8 * 8)
+    /// The screen Henge is on. An iPhone Duo has two, and UIScreen.main can be the one Henge is not on.
+    static var screen: UIScreen {
+        if !isPad {
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                .filter { $0.session.role == .windowApplication }
+            if let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first {
+                return scene.screen
+            }
+        }
+        return UIScreen.main
     }
-    static var retinaMM: (width: Int, height: Int) {
-        let s = retinaScreen
+    /// Where a Retina Mac can be offered: every iPad, and an iPhone's large screen (iPhone Duo unfolded).
+    static var offersRetina: Bool { isPad || largeScreen }
+
+    static let retinaPPI = 264.0
+
+    /// The panel itself, on its side: every physical pixel, and a size in mm at 264 ppi so that macOS
+    /// sees a Retina density and draws at 2x (looks like half the pixels, sharp as iOS's own UI).
+    /// Every iPad with an M chip is 264 ppi. An iPhone Duo's inner screen gets the same density, so macOS
+    /// picks 2x there too; on that screen the panel is 2853 × 2007, and a Mac that leaves the side strip
+    /// gets the panel less the strip.
+    static func retinaScreen(fill: Bool = true) -> (width: Int, height: Int) {
+        let n = screen.nativeBounds.size
+        var long = max(n.width, n.height), short = min(n.width, n.height)
+        if !isPad, largeScreen, !fill { long -= sideStrip * screen.nativeScale }
+        return (Int(long) / 8 * 8, Int(short) / 8 * 8)
+    }
+    static func retinaMM(fill: Bool = true) -> (width: Int, height: Int) {
+        let s = retinaScreen(fill: fill)
         return (Int((Double(s.width) / retinaPPI * 25.4).rounded()), Int((Double(s.height) / retinaPPI * 25.4).rounded()))
     }
-    static let retinaPPI = 264.0
 
     /// The external display's own diagonal, in inches, from the app's settings (`henge.external.inches`).
     /// iOS tells an app nothing about a monitor's physical size, and macOS needs the size to offer a
@@ -54,8 +109,7 @@ enum Device {
     /// How round the screen's corners are, in points: UIScreen's own figure (private, read by name; 0 if a later iOS
     /// drops it). For giving macOS the panel's shape, as a MacBook's device tree does.
     static var displayCornerRadius: CGFloat {
-        let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first ?? UIScreen.main
-        return (screen.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
+        (screen.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
     }
 
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.
