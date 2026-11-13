@@ -217,6 +217,7 @@ struct SessionView: View {
                 // A lock or the app switcher may have taken the mouse and keyboard back: iOS reclaims
                 // both when the session stops being active, and nothing here re-attached them until now.
                 HardwareMouse.shared.start()
+                VendorMice.shared.start()
                 KeyboardCatcher.reattach()
                 InstantResume.cameBack(mac)
                 return
@@ -224,6 +225,9 @@ struct SessionView: View {
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
             VolumeClicks.shared.releaseButtons()
+            // While docked to an external display, locking the phone makes the phone's scene inactive/background
+            // even though the external monitor stays visible; keep the Mac running unless there is no external display.
+            guard !display.isExternal else { return }
             if phase == .inactive { InstantResume.pause() }
             if phase == .background && bootRAM > 0 { InstantResume.suspend(mac, ramMB: bootRAM, cpus: cpus) }
         }

@@ -18,6 +18,8 @@ struct HengeApp: App {
         HengeLog.log("app", "increased memory limit: \(Entitlements.increasedMemory ? "yes" : "no"); extended addressing: \(Entitlements.extendedAddressing ? "yes" : "no"); limit \(Entitlements.memoryLimitAtLaunch >> 20) MB")
         // Without the guard, a brk no debugger answers kills the app instead of failing.
         JITBootstrap.installTrapGuard()
+        MacShortcuts.configure()
+        HengeAudio.shared.start()
         try? AVAudioSession.sharedInstance().setCategory(.playback, options: [.mixWithOthers])
         Machines.shared.collectImports()
         // The display question: does this iOS have Apple's paravirtualized graphics at all?

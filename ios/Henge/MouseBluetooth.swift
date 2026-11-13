@@ -65,6 +65,10 @@ final class VendorMice: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     private func suspend() {
+        // When presenting on an external display, locking the phone screen triggers didEnterBackground on the
+        // phone scene while the external monitor stays live; keep the BLE mouse connected for the Mac.
+        let onExternal = DispatchQueue.main.sync { DisplayRouter.current?.isExternal == true }
+        guard !onExternal else { return }
         // Synchronous, so the writes are queued before the app is suspended. If iOS kills Henge before they go
         // out, turning the mouse off and on hands it back, since none of the diversion is persistent.
         queue.sync { if wanted { releaseAll() } }

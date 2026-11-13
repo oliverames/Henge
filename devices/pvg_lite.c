@@ -204,12 +204,32 @@ static void display_put_modes(uint8_t *d, uint32_t w, uint32_t h) {
     PUT32(0x14, height_mm << 16 | width_mm);
     PUTF(0x24, (float)width_mm);
     PUTF(0x28, (float)height_mm);
-    PUT32(0x208, 1); /* one mode: */
-    PUT32(0x210, h << 16 | w);
-    {   /* m4 fork: 120 Hz on ProMotion (HV_HZ), so WindowServer animates at the panel's rate */
-        const char *hz = getenv("HV_HZ");
-        uint32_t r = hz && atoi(hz) > 0 ? (uint32_t)atoi(hz) : 60;
-        PUT32(0x214, r << 16);
+    PUT32(0x4c, height_mm << 16 | width_mm);
+    d[0x50] = (ppmm >= 5.0f) ? 2 : 1;
+    const char *hz = getenv("HV_HZ");
+    uint32_t r = hz && atoi(hz) > 0 ? (uint32_t)atoi(hz) : 60;
+    typedef struct { uint32_t w, h; } Mode;
+    Mode modes[8];
+    uint32_t n = 0;
+    modes[n++] = (Mode){ w, h };
+    if (ppmm >= 5.0f && (w & 1) == 0 && (h & 1) == 0 && w >= 1280 && h >= 720) {
+        /* SkyLight pairs (2W, 2H) as the 2x HiDPI backing of (W, H) only when both are in the mode list. */
+        modes[n++] = (Mode){ w / 2, h / 2 };
+        if (w == 3840 && h == 2160) {
+            /* Standard 24"/27" 4K HiDPI scaled tiers ("Looks like 2304x1296" and "More Space 3008x1692"). */
+            modes[n++] = (Mode){ 4608, 2592 };
+            modes[n++] = (Mode){ 2304, 1296 };
+            modes[n++] = (Mode){ 6016, 3384 };
+            modes[n++] = (Mode){ 3008, 1692 };
+        }
+    }
+    PUT32(0x208, n);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t off = 0x210 + i * 16;
+        PUT32(off + 0, modes[i].h << 16 | modes[i].w);
+        PUT32(off + 4, r << 16);
+        PUT32(off + 8, 0);
+        PUT32(off + 12, 0);
     }
 #undef PUT32
 #undef PUTF

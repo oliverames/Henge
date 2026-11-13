@@ -41,6 +41,7 @@ struct ExternalMacDisplay: View {
         // display it is (iOS reports neither, so the diagonal comes from the app's settings, Device).
         display.setExternalDensity(Device.externalDensity(points: size, scale: self.scale))
         display.want(DisplayRouter.Size.external(size, scale: self.scale), on: surface)
+        KeyboardCatcher.reattach()
     }
 }
 

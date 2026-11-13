@@ -80,6 +80,57 @@ struct KeyboardCatcher: UIViewRepresentable {
         }
         override var undoManager: UndoManager? { GCKeyboard.coalesced == nil ? super.undoManager : nil }
 
+        private static let macShortcutCommands: [UIKeyCommand] = {
+            let pairs: [(String, UIKeyModifierFlags, UInt8)] = [
+                (" ", .command, 0x2c),
+                (" ", [.command, .alternate], 0x2c),
+                ("\t", .command, 0x2b),
+                ("\t", [.command, .shift], 0x2b),
+                ("`", .command, 0x35),
+                ("h", .command, 0x0b),
+                ("m", .command, 0x10),
+                ("q", .command, 0x14),
+                ("w", .command, 0x1a),
+                (",", .command, 0x36),
+            ]
+            return pairs.map { input, flags, _ in
+                let cmd = UIKeyCommand(input: input, modifierFlags: flags, action: #selector(handleMacShortcut(_:)))
+                cmd.wantsPriorityOverSystemBehavior = true
+                return cmd
+            }
+        }()
+
+        override var keyCommands: [UIKeyCommand]? { Self.macShortcutCommands }
+
+        @objc private func handleMacShortcut(_ command: UIKeyCommand) {
+            // If pressesBegan already delivered the key to the guest within the last 100 ms, avoid sending a duplicate.
+            guard !HardwareKeys.keyJustPressed, let input = command.input else { return }
+            let mods = command.modifierFlags
+            if mods.contains(.command) { henge_vm_key_hid(0xe3, 1) }
+            if mods.contains(.shift) { henge_vm_key_hid(0xe1, 1) }
+            if mods.contains(.alternate) { henge_vm_key_hid(0xe2, 1) }
+            if mods.contains(.control) { henge_vm_key_hid(0xe0, 1) }
+            let usage: UInt8? = switch input {
+            case " ": 0x2c
+            case "\t": 0x2b
+            case "`": 0x35
+            case "h": 0x0b
+            case "m": 0x10
+            case "q": 0x14
+            case "w": 0x1a
+            case ",": 0x36
+            default: nil
+            }
+            if let usage {
+                henge_vm_key_hid(usage, 1)
+                henge_vm_key_hid(usage, 0)
+            }
+            if mods.contains(.control) { henge_vm_key_hid(0xe0, 0) }
+            if mods.contains(.alternate) { henge_vm_key_hid(0xe2, 0) }
+            if mods.contains(.shift) { henge_vm_key_hid(0xe1, 0) }
+            if mods.contains(.command) { henge_vm_key_hid(0xe3, 0) }
+        }
+
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
             let rest = HardwareKeys.send(presses, down: true)
             if !rest.isEmpty { super.pressesBegan(rest, with: event) }
