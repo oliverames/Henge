@@ -1,4 +1,5 @@
 build/
+.DS_Store
 # Local Mac backups (disk images, aux, pairing files). Never commit.
 /backups/
 
