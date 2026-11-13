@@ -2,7 +2,7 @@
 
 Host: macOS 27.3 dyld shared cache (arm64e), used as a proxy for the 27.2 guest. Differences between 27.2 and 27.3 were not checked.
 All addresses are unslid cache addresses. Tools: `ipsw dyld disass --image <X> --quiet` (whole-image disassembly, 2 s per image), `ipsw dyld str` / `macho --strings --symbols --objc --swift`, in-process ctypes calls on this Mac for ObjC IMPs and stub resolution, plus a live call of the SkyLight inset function (below).
-Scratch (helper scripts, disassemblies): `/private/tmp/claude-501/-Users-oliverames-Developer/dd0bcb52-4e09-4bba-b6cd-00c5e9237670/scratchpad/agent-cr/` (`xr.py` string xrefs, `callers2.py`, `resolve.py` stub resolver, `show.sh`/`show2.sh` symbolized function dump, `inset.py` live probe).
+Scratch (helper scripts, disassemblies): host scratch, not kept (`xr.py` string xrefs, `callers2.py`, `resolve.py` stub resolver, `show.sh`/`show2.sh` symbolized function dump, `inset.py` live probe).
 Labels: PROVEN = read in disassembly or observed live. INFERRED = reasoning from proven pieces, flagged where the last link is missing.
 
 ## 0. Short answer
@@ -34,7 +34,7 @@ PROVEN. The string `display-corner-radius` exists once in the cache, in libMobil
 - Table entry: file offset 0x9d240 holds `{key string 0x186eec2d9, getter 0x186ea0e10}`.
 - Getter 0x186ea0e10: calls the device-tree helper at 0x186e79d3c with path `IODeviceTree:/product` (cstring 0x186ee915d) and property CFSTR `display-corner-radius` (CFSTR 0x1e261fb20, verified). The result must be `CFData` of exactly 8 bytes (otherwise a log and 0.0). Value = `float(u32[0]) / float(u32[1])` (u32[1] == 0 returns 0.0).
 - The Swift module `MobileGestaltPrivate` has the same key (`DeviceCornerRadius.key` 0x186eba330, `DeviceQuery` ext 0x186eba368, a key to property table at 0x186eb5ef4..0x186eb5f90 listing `display-rotation`, `display-corner-radius`, `chrome-identifier`, `framebuffer-identifier`, `special-regions-count`). Exported C entry: `_MobileGestalt_get_deviceCornerRadius` (0x186e83c10), which calls `MGCopyAnswer` with CFSTR at 0x1e2615f00.
-- Observed on this host (MacBook Pro 14, M2 Pro): `/product` has no `display-corner-radius`; `/chosen` has `display-corner-radius = <00000000>` (4 bytes, ioreg). So on a notch Mac the MG answer is 0 with an error log, and nothing in the OS depends on it for the Mac corner geometry. I found no user-space reader of the `/chosen` copy (kexts are not in the cache and were not examined).
+- Observed on this host (MacBook Pro 14, M2 Pro): `/product` and `/chosen` both have `display-corner-radius = <00000000>` (4 bytes, ioreg). An earlier version of this note said `/product` had none; it has a 4-byte zero. The getter needs exactly 8 bytes, so on a notch Mac the MG answer is 0 with an error log, and nothing in the OS depends on it for the Mac corner geometry. I found no user-space reader of the `/chosen` copy (kexts are not in the cache and were not examined).
 - Callers: no other cache image contains the obfuscated key, so nothing in the cache calls it by that string. UIKitCore calls it by plain name: `___32-[UIScreen _displayCornerRadius]_block_invoke` (0x1ab656690) checks an internal preference (`DisplayCornerRadiusOverride`), then `MGCopyAnswer(CFSTR("DeviceCornerRadius"))` (CFSTR 0x1e54ce120). That is the Catalyst/iOS-on-Mac `UIScreen`, not the macOS menu bar.
 
 ### 2.2 Other variants
@@ -58,7 +58,7 @@ PROVEN. `WS::Displays::Display::create_bezel_physical_path(unsigned partID, doub
 - Parts 5, 6, 7, 8 (corners): path stored at `+0x110/+0x118/+0x120/+0x128`, radius stored at `+0x190` (TL), `+0x198` (TR), `+0x1a0` (BL), `+0x1a8` (BR), each multiplied by the sum of two scale fields of the display (`radius * ([+0x98] + [+0xa8])`, 0x18286c394..0x18286c510). A copy goes to `+0x2b0` when `current_mode_has_rounded_corners` (0x18286bf90), 0x18286ca30..0x18286ca44.
 - Parts 1 and 3: rects at `+0x130` and `+0x150` (left and right aux areas, clamped by `validate_and_clamp_bezel_rect` 0x18286bf34). Part 2: path at `+0x100`. Part 9: island path `+0x108`, sarlacc rect `+0x170`.
 - Menu bar height (`[this+0x2f0]`): if `current_mode_has_notch` (0x18286be6c), height = floor(rect +0x168 + 4 or 5), raised to at least 26 when `WS::Features::solarium_menubar_enabled()` is true, in 0x18286c5b4..0x18286c658; else a width-based or constant value (0x18286c614..0x18286c654). This is what turns a notch shape into the observed `safeAreaInsets.top` (32.5 in your run; the exact arithmetic of the 32.5 was not reconstructed).
-- Notch rect: `has_sarlacc` (0x18286ce24) is true if the sarlacc rect at `+0x1d0` is non-empty; `current_mode_has_notch` also needs rect `+0x1b0` empty or the mode to qualify. Exposed as `WSDisplayGetSarlaccRect` (0x18286d8c8) and `PKGDisplayGetSarlaccRect` (0x182b11734).
+- Notch rect: `has_sarlacc` (0x18286ce24) is true if the sarlacc rect at `+0x1d0` is non-empty. `current_mode_has_notch` (0x18286be6c) is true only when the notch rect at `+0x1b0` is non-empty AND the current mode is not a safe aperture (`SLCADisplay::is_safe_aperture_implicitly()`, vtable +0x160). See [menu-bar-corner-levers.md](menu-bar-corner-levers.md), section 4. Exposed as `WSDisplayGetSarlaccRect` (0x18286d8c8) and `PKGDisplayGetSarlaccRect` (0x182b11734).
 
 ### 3.2 Who uses the corner radii
 
