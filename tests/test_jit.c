@@ -63,7 +63,8 @@ int main(void) {
         seed_cpu(&init, 99, sp);
         for (int r = 0; r < 31; r++) init.x[r] = r & 1 ? 0xfffffe0007123450ull + r * 8 : 0x100004000ull + r * 8;
         int bad = run_jit(&m, &pac_prog, &init, &jit, NULL);
-        HvCpu want = init;
+        static HvCpu want;
+        want = init;
         want.x[4] = 0;
         want.x[9] = init.x[30];  /* RETAB came back here, so x30 was restored */
         want.x[10] = init.x[30];
