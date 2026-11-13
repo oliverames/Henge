@@ -15,6 +15,11 @@
 #include "sysreg.h"
 #include "translate.h"
 
+/* Was this code translated before? (hashed, approximate). Cleared on a full flush or eviction so the
+   diagnostic counts retranslations in the current cache window rather than saturating. */
+static uint64_t seen_va[1 << 18], seen_vapa[1 << 18];
+static void reset_retrans(void) { memset(seen_va, 0, sizeof seen_va); memset(seen_vapa, 0, sizeof seen_vapa); }
+
 static int poison_on(void) {
     static int poison = -1;
     if (poison < 0) poison = getenv("HV_JIT_POISON") != NULL;
@@ -33,6 +38,7 @@ void hv_flush_blocks(HvMachine *m) {
     }
     m->stats.block_flushes++;
     __atomic_add_fetch(&m->jit_gen, 1, __ATOMIC_SEQ_CST);
+    reset_retrans();
     for (int i = 0; i < m->ncpus; i++)
         if (m->cpus[i]) {
             hv_ijc_reset(m->cpus[i], 0);
@@ -76,6 +82,7 @@ void hv_evict_blocks(HvMachine *m) {
     const uint32_t *lo = r->base + (size_t)seg * r->seg_words, *hi = lo + r->seg_words;
 #define GONE(p) ((const uint32_t *)(uintptr_t)(p) >= lo && (const uint32_t *)(uintptr_t)(p) < hi)
     m->stats.evictions++;
+    reset_retrans();
     for (int i = 0; i < m->ncpus; i++)
         if (m->cpus[i]) {
             hv_ijc_reset(m->cpus[i], 0);
@@ -305,7 +312,19 @@ static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, con
     /* ...then take the lock only to publish it. */
     if (pthread_mutex_trylock(&m->tr_mu) != 0) {
         uint64_t w0 = m->stats_interval ? mach_absolute_time() : 0;
-        pthread_mutex_lock(&m->tr_mu);
+        int got = 0;
+        /* Brief user-space spin before falling back to syscalls when another CPU is mid-publish. */
+        for (int spin = 1; spin <= 128 && !got; spin++) {
+#if defined(__aarch64__)
+            __asm__ volatile("yield");
+#endif
+            if ((spin & 7) == 0) got = pthread_mutex_trylock(&m->tr_mu) == 0;
+        }
+        for (int y = 0; y < 8 && !got; y++) {
+            sched_yield();
+            got = pthread_mutex_trylock(&m->tr_mu) == 0;
+        }
+        if (!got) pthread_mutex_lock(&m->tr_mu);
         if (m->stats_interval) {
             m->stats.tr_waits++;
             m->stats.tr_wait_ticks += mach_absolute_time() - w0;
@@ -327,7 +346,6 @@ static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, con
     m->stats.translations++;
     if (m->stats_interval) {
         m->stats.translated_words += m->jit.used - used0;
-        static uint64_t seen_va[1 << 18], seen_vapa[1 << 18]; /* was this code translated before? (hashed, so approximate) */
         uint32_t hv = (uint32_t)(((va >> 2) ^ flags) * 0x9e3779b97f4a7c15ull >> 40);
         uint32_t hp = (uint32_t)((((va >> 2) ^ flags) * 0x9e3779b97f4a7c15ull ^ pa * 0xc2b2ae3d27d4eb4full) >> 40);
         if (seen_va[hv >> 6] >> (hv & 63) & 1) m->stats.retrans_va++;
