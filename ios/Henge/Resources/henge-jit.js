@@ -39,18 +39,23 @@ if (!detached && (typeof attachResponse !== "string" || !/^T[0-9a-f]{2}/i.test(a
 }
 
 let totalBreakpoints = 0;
+// A stop that is not one of our brk traps is a real signal: it goes back to the thread
+// as vCont;S<sig>:<tid>, and the stop reply that comes back is handled as the next stop.
+let nextStop = null;
 while (!detached) {
     totalBreakpoints++;
     log(`Handling breakpoint ${totalBreakpoints}`);
     
     let brkResponse;
     try {
-        brkResponse = send_command(`c`);
+        // a signal passed on below is answered with the next stop, so use that instead of resuming again
+        brkResponse = nextStop !== null ? nextStop : send_command(`c`);
     } catch (error) {
         failure = `JIT_CONNECTION_LOST: debugserver disconnected: ${error}. JIT was NOT confirmed.`;
         log(failure);
         break;
     }
+    nextStop = null;
     log(`brkResponse = ${brkResponse}`);
     if (typeof brkResponse !== "string" || !/^T[0-9a-f]{2}/i.test(brkResponse)) {
         failure = `JIT_CONNECTION_LOST: expected a stop packet but received ${brkResponse}; stopping instead of sending more commands.`;
@@ -75,6 +80,23 @@ while (!detached) {
     let instructionResponse = send_command(`m${pc.toString(16)},4`);
     log(`instruction at pc: ${instructionResponse}`);
     let instrU32 = littleEndianHexToU32(instructionResponse);
+    if (!isBrk(instrU32)) {
+        // a real signal or exception, not one of our traps: give it back to the thread and let it run
+        tmpMatch = /^T(?<sig>[0-9a-f]{2})/i.exec(brkResponse);
+        if (!tmpMatch) {
+            log(`Stopped on something that is not a brk and has no signal: ${brkResponse}`);
+            continue;
+        }
+        log(`Not a brk (instruction 0x${instrU32.toString(16)}); resuming with signal ${tmpMatch.groups['sig']}`);
+        try {
+            nextStop = send_command(`vCont;S${tmpMatch.groups['sig']}:${tid}`);
+        } catch (error) {
+            failure = `JIT_CONNECTION_LOST: debugserver disconnected: ${error}. JIT was NOT confirmed.`;
+            log(failure);
+            break;
+        }
+        continue;
+    }
     let brkImmediate = extractBrkImmediate(instrU32);
     log(`BRK immediate: 0x${brkImmediate.toString(16)} (${brkImmediate})`);
     if (legacyCommands[brkImmediate] != undefined) {
@@ -213,6 +235,10 @@ function numberToLittleEndianHexString(num) {
 
 function littleEndianHexToU32(hexStr) {
     return parseInt(hexStr.match(/../g).reverse().join(''), 16);
+}
+
+function isBrk(u32) {
+    return ((u32 & 0xFFE0001F) >>> 0) === 0xD4200000;
 }
 
 function extractBrkImmediate(u32) {

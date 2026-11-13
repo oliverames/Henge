@@ -293,3 +293,11 @@ $(B)/test_disk_growth: ios/Henge/DiskGrowth.swift tests/test_disk_growth.swift |
 test-disk-growth: $(B)/test_disk_growth
 	$(B)/test_disk_growth
 .PHONY: test-disk-growth
+
+# henge-jit.js (run by StikDebug and the built-in helper) against a scripted debugserver: protocol regressions under node, signal-stop handling under the system's JavaScriptCore.
+JSC = /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc
+
+test-jit-script:
+	node tests/test_henge_jit_script.js
+	$(JSC) tests/test_jit_script.js
+.PHONY: test-jit-script
