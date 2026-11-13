@@ -73,8 +73,57 @@ final class Installer: NSObject, ObservableObject {
         }
     }
 
-    nonisolated static var imageDirectory: URL { Machines.root.appendingPathComponent("Restore images", isDirectory: true) }
-    nonisolated static func imagePath(_ r: MacOSRelease) -> URL { imageDirectory.appendingPathComponent("\(r.id).ipsw") }
+    nonisolated static var imageDirectory: URL { DownloadStorage.currentDirectory }
+    nonisolated static func imagePath(_ r: MacOSRelease) -> URL {
+        if let custom = DownloadStorage.currentIPSW, isMatchingIPSW(custom, release: r) {
+            return custom
+        }
+        let dir = imageDirectory
+        let standard = dir.appendingPathComponent("\(r.id).ipsw")
+        if FileManager.default.fileExists(atPath: standard.path) {
+            return standard
+        }
+        let appleFile = dir.appendingPathComponent(r.url.lastPathComponent)
+        if FileManager.default.fileExists(atPath: appleFile.path) {
+            return appleFile
+        }
+        return standard
+    }
+
+    /// Whether this file is the image of `r`: its BuildManifest.plist names that build (the file's name says nothing).
+    nonisolated static func isMatchingIPSW(_ file: URL, release r: MacOSRelease) -> Bool {
+        ipswInfo(file)?.build == r.id
+    }
+
+    /// What a picked file is: the macOS it holds, or why Henge cannot install it. nil when Henge offers that build.
+    nonisolated static func ipswProblem(_ file: URL) -> String? {
+        guard let info = ipswInfo(file) else { return "This file is not a macOS restore image." }
+        if MacOSRelease.all.contains(where: { $0.id == info.build }) { return nil }
+        return "This restore image is macOS \(info.version) (build \(info.build)), which Henge doesn't offer yet."
+    }
+
+    struct IPSWInfo { let version: String; let build: String }
+
+    /// The version and build from the IPSW's BuildManifest.plist, read once per file (reading opens a 15 GB zip).
+    nonisolated static func ipswInfo(_ file: URL) -> IPSWInfo? { ipswInfoCache.info(file) }
+    private nonisolated static let ipswInfoCache = IPSWInfoCache()
+
+    private final class IPSWInfoCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var known: [String: IPSWInfo?] = [:]
+
+        func info(_ file: URL) -> IPSWInfo? {
+            lock.lock()
+            defer { lock.unlock() }
+            if let seen = known[file.path] { return seen }
+            var version = [CChar](repeating: 0, count: 64)
+            var build = [CChar](repeating: 0, count: 64)
+            let found = hv_ipsw_info(file.path, &version, version.count, &build, build.count) == 0
+                ? IPSWInfo(version: String(cString: version), build: String(cString: build)) : nil
+            known[file.path] = .some(found)
+            return found
+        }
+    }
 
     /// The size of the image on this iPhone, if a whole one is there (the listed sizes are rounded).
     static func imageSize(_ r: MacOSRelease) -> Int64? {
@@ -86,6 +135,10 @@ final class Installer: NSObject, ObservableObject {
     static func haveImage(_ r: MacOSRelease) -> Bool { imageSize(r) != nil }
 
     static func deleteImage(_ r: MacOSRelease) {
+        if let custom = DownloadStorage.currentIPSW, isMatchingIPSW(custom, release: r) {
+            DownloadStorage.shared.clearCustomIPSW()
+            return
+        }
         try? FileManager.default.removeItem(at: imagePath(r))
         try? FileManager.default.removeItem(at: partPath(r))
     }
@@ -97,8 +150,25 @@ final class Installer: NSObject, ObservableObject {
         return n > 0 ? n : nil
     }
 
-    /// Free space an install takes: the new Mac's disk, and the download if it is not here yet.
-    static func spaceNeeded(_ r: MacOSRelease) -> Int64 { (haveImage(r) ? 0 : max(r.bytes - (partSize(r) ?? 0), 0)) + r.macBytes }
+    /// Space needed for the download itself (0 if already downloaded or using a custom IPSW).
+    static func downloadNeeded(_ r: MacOSRelease) -> Int64 {
+        haveImage(r) ? 0 : max(r.bytes - (partSize(r) ?? 0), 0)
+    }
+
+    /// Internal storage space needed for this install:
+    /// When external storage is used for download, only the new Mac's disk is on internal storage.
+    /// When internal storage is used, both the download and the new Mac's disk are on internal storage.
+    static func internalSpaceNeeded(_ r: MacOSRelease) -> Int64 {
+        if DownloadStorage.isExternal {
+            return r.macBytes
+        }
+        return downloadNeeded(r) + r.macBytes
+    }
+
+    /// Free space an install takes in total across all storage: the new Mac's disk, and the download if it is not here yet.
+    static func spaceNeeded(_ r: MacOSRelease) -> Int64 {
+        downloadNeeded(r) + r.macBytes
+    }
 
     func reset() { if !busy { phase = .idle } }
 
@@ -130,7 +200,7 @@ final class Installer: NSObject, ObservableObject {
                 made = mac
                 phase = .installing
                 try await install(mac, ipsw: ipsw, cpus: cpus)
-                if !keepImage { try? FileManager.default.removeItem(at: ipsw) }
+                if !keepImage && DownloadStorage.currentIPSW == nil { try? FileManager.default.removeItem(at: ipsw) }
                 HengeLog.log("install", "\(name): installed \(release.name)")
                 phase = .done("\(release.name) is installed on \(name). Quit Henge (swipe it away) and open it again, then tap Start.")
             } catch {
@@ -143,20 +213,43 @@ final class Installer: NSObject, ObservableObject {
     }
 
     private func checkSpace(_ r: MacOSRelease) throws {
-        let free = (try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-            .volumeAvailableCapacityForImportantUsage ?? 0
-        let needed = Self.spaceNeeded(r)
-        if free > 0 && free < needed {
-            throw message("This install needs about \(ByteText.string(UInt64(needed))) free; this \(Device.name) has \(ByteText.string(UInt64(free))).")
+        let storage = DownloadStorage.shared
+        let internalFree = storage.internalAvailableSpace ?? 0
+        let download = Self.downloadNeeded(r)
+
+        if storage.isExternal {
+            storage.checkReachability()
+            guard storage.isReachable else {
+                throw message("External storage '\(storage.customDirectoryName ?? "drive")' is disconnected. Reconnect it or choose internal storage.")
+            }
+            let externalFree = storage.externalAvailableSpace ?? 0
+            if download > 0 && externalFree > 0 && externalFree < download {
+                throw message("The external storage needs about \(ByteText.string(UInt64(download))) free for the download; it has \(ByteText.string(UInt64(externalFree))).")
+            }
+            if internalFree > 0 && internalFree < r.macBytes {
+                throw message("This install needs about \(ByteText.string(UInt64(r.macBytes))) free on this \(Device.name) for macOS; this \(Device.name) has \(ByteText.string(UInt64(internalFree))).")
+            }
+        } else {
+            let totalNeeded = download + r.macBytes
+            if internalFree > 0 && internalFree < totalNeeded {
+                throw message("This install needs about \(ByteText.string(UInt64(totalNeeded))) free; this \(Device.name) has \(ByteText.string(UInt64(internalFree))). Connect external storage to download macOS there instead.")
+            }
         }
     }
 
     // MARK: Download
 
     private func download(_ r: MacOSRelease) async throws -> URL {
+        let storage = DownloadStorage.shared
+        if let custom = storage.customIPSWURL, Self.isMatchingIPSW(custom, release: r) {
+            HengeLog.log("install", "using selected IPSW: \(custom.path)")
+            return custom
+        }
         let dest = Self.imagePath(r)
         try FileManager.default.createDirectory(at: Self.imageDirectory, withIntermediateDirectories: true)
-        Machines.excludeFromBackup(Self.imageDirectory)
+        if !storage.isExternal {
+            Machines.excludeFromBackup(Self.imageDirectory)
+        }
         if Self.haveImage(r) {
             HengeLog.log("install", "using the downloaded \(r.name)")
             return dest
@@ -168,7 +261,7 @@ final class Installer: NSObject, ObservableObject {
         received = RangedDownload.size(of: part)
         expected = r.bytes
         if received > 0 { HengeLog.log("install", "going on with \(r.name)'s download from \(ByteText.string(UInt64(received)))") }
-        HengeLog.log("install", "downloading \(r.url.absoluteString)")
+        HengeLog.log("install", "downloading \(r.url.absoluteString) to \(part.path)")
         for attempt in 1...20 {
             let d = RangedDownload(url: r.url, part: part) { have, total in
                 Task { @MainActor in

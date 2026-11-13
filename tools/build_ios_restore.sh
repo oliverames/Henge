@@ -73,7 +73,7 @@ compile muxd -DPACKAGE_NAME='"usbmuxd"' -DPACKAGE_VERSION='"1.1.1-henge"' -Dmain
 compile idr -I"$TP/idevicerestore/src" -DIDEVICERESTORE_NOMAIN -DPACKAGE_NAME='"idevicerestore"' -DPACKAGE_VERSION='"1.0.0-henge"' -- \
     "$TP"/idevicerestore/src/*.c
 compile henge -std=c11 -I"$ROOT/core" -I"$ROOT/host" -I"$ROOT/devices" -- \
-    "$ROOT/host/libusb_shim.c" "$ROOT/host/install.c"
+    "$ROOT/host/libusb_shim.c" "$ROOT/host/install.c" "$ROOT/host/ipsw_info.c"
 compile hengeobjc -fobjc-arc -- "$ROOT/host/curl_shim.m"
 
 rm -f "$BUILD/libhengerestore.a"

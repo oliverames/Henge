@@ -1,20 +1,25 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Download macOS (or use a copy already on this device) and install it on a new Mac.
 struct InstallView: View {
     @ObservedObject private var installer = Installer.shared
     @ObservedObject private var jit = JITCoordinator.shared
+    @ObservedObject private var storage = DownloadStorage.shared
     @State private var jitReady = JITBootstrap.ready
     @StateObject private var display = DisplayRouter()
     @State private var release = MacOSRelease.all.first(where: Installer.haveImage) ?? MacOSRelease.recommended
     @State private var name = "Mac"
     @State private var ramGB = Device.suggestedRAMGB
     @State private var deleteAfter = false
-    @State private var refresh = 0 // redraws the list when a download is deleted
+    @State private var refresh = 0 // redraws the list when a download is deleted or storage changes
     @State private var details = false
     @State private var stageStarted = Date()
     @State private var stageSeen = -1
     @State private var confirmDeleteDownload: MacOSRelease?
+    @State private var pickingFolder = false
+    @State private var pickingIPSW = false
+    @State private var ipswProblem: String?
     @AppStorage("henge.cpus") private var cpus = 4
 
     var body: some View {
@@ -37,6 +42,26 @@ struct InstallView: View {
             }
             .background(Desk.page)
             .navigationTitle(installer.busy ? "Installing" : "Install macOS")
+            .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
+                if case let .success(url) = result {
+                    if storage.setCustomDirectory(url) {
+                        refresh += 1
+                    }
+                }
+            }
+            .fileImporter(isPresented: $pickingIPSW, allowedContentTypes: [UTType(filenameExtension: "ipsw") ?? .data]) { result in
+                if case let .success(url) = result {
+                    if storage.setCustomIPSW(url) {
+                        ipswProblem = Installer.ipswProblem(url)
+                        if ipswProblem != nil {
+                            storage.clearCustomIPSW()
+                        } else if let r = MacOSRelease.all.first(where: { Installer.isMatchingIPSW(url, release: $0) }) {
+                            release = r
+                        }
+                        refresh += 1
+                    }
+                }
+            }
             .task {
                 while !Task.isCancelled { // the region may be claimed after a hand-off to StikDebug
                     jitReady = JITBootstrap.ready
@@ -86,6 +111,104 @@ struct InstallView: View {
             }
         }
 
+        DeskHeading("Download Storage")
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: storage.isExternal ? "externaldrive.fill" : "internaldrive")
+                    .font(.system(size: 20))
+                    .foregroundStyle(storage.isExternal ? Desk.accentLight : Desk.dim)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(storage.locationDisplayName)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(Desk.text)
+                    if storage.isExternal && !storage.isReachable {
+                        Text("Disconnected: reconnect drive or switch to internal")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Desk.bad)
+                    } else if let free = storage.availableSpace {
+                        Text("\(ByteText.string(UInt64(free))) free on \(storage.isExternal ? "external storage" : Device.name)")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Desk.dim)
+                    }
+                }
+                Spacer()
+                Menu {
+                    Button {
+                        pickingFolder = true
+                    } label: {
+                        Label("Choose External Folder…", systemImage: "folder.badge.plus")
+                    }
+                    Button {
+                        pickingIPSW = true
+                    } label: {
+                        Label("Select IPSW File…", systemImage: "doc.badge.plus")
+                    }
+                    if storage.isExternal || storage.customIPSWURL != nil {
+                        Button(role: .destructive) {
+                            storage.resetToDefault()
+                            storage.clearCustomIPSW()
+                            refresh += 1
+                        } label: {
+                            Label("Use Internal Storage", systemImage: "internaldrive")
+                        }
+                    }
+                } label: {
+                    Text("Change")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Desk.accentLight)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Desk.raised)
+                        .clipShape(Capsule())
+                }
+            }
+            .padding(.horizontal, 17)
+            .padding(.vertical, 12)
+
+            if let customIPSW = storage.customIPSWURL {
+                Rectangle().fill(Desk.hairline).frame(height: 0.5)
+                HStack {
+                    Image(systemName: "doc.zipper")
+                        .font(.system(size: 18))
+                        .foregroundStyle(Desk.good)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(customIPSW.lastPathComponent)
+                            .font(.system(size: 14, weight: .medium))
+                            .lineLimit(1)
+                        if let size = try? customIPSW.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                            Text("Using external IPSW, \(ByteText.string(UInt64(size)))")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Desk.good)
+                        }
+                    }
+                    Spacer()
+                    Button {
+                        storage.clearCustomIPSW()
+                        refresh += 1
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(Desk.dim)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Remove custom IPSW")
+                }
+                .padding(.horizontal, 17)
+                .padding(.vertical, 10)
+            }
+            if let problem = ipswProblem {
+                Rectangle().fill(Desk.hairline).frame(height: 0.5)
+                Text(problem)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Desk.bad)
+                    .padding(.horizontal, 17)
+                    .padding(.vertical, 10)
+            }
+        }
+        .deskCard()
+
         DeskHeading("New Mac")
         VStack(spacing: 0) {
             TextField("Name", text: $name)
@@ -128,14 +251,14 @@ struct InstallView: View {
         }
         .deskCard()
 
+        let isReadyToInstall = jitReady && !Device.chipTooOld && (!storage.isExternal || storage.isReachable)
         Button(Installer.haveImage(release) ? "Install" : "Download and Install") {
             installer.start(release, name: name.isEmpty ? "Mac" : name, ramMB: ramGB * 1024, cpus: cpus, keepImage: !deleteAfter)
         }
-        .buttonStyle(DeskButtonStyle(enabled: jitReady && !Device.chipTooOld))
-        .disabled(!jitReady || Device.chipTooOld)
+        .buttonStyle(DeskButtonStyle(enabled: isReadyToInstall))
+        .disabled(!isReadyToInstall)
         .padding(.top, 20)
-        Text(Device.chipTooOld ? Device.chipTooOldText : jitReady ? "Keep Henge open and the \(Device.name) plugged in. Needs about \(ByteText.string(UInt64(Installer.spaceNeeded(release)))) free."
-                                : JITBootstrap.lastFailure ?? "Turn on JIT first. \(jit.automaticDescription)")
+        Text(statusNotice)
             .font(.system(size: 13))
             .foregroundStyle(Desk.dim)
             .multilineTextAlignment(.center)
@@ -146,6 +269,23 @@ struct InstallView: View {
                 .buttonStyle(DeskButtonStyle())
                 .padding(.top, 12)
         }
+    }
+
+    private var statusNotice: String {
+        if Device.chipTooOld { return Device.chipTooOldText }
+        if !jitReady { return JITBootstrap.lastFailure ?? "Turn on JIT first. \(jit.automaticDescription)" }
+        if storage.isExternal && !storage.isReachable {
+            return "External storage is disconnected. Connect it to continue."
+        }
+        let dl = Installer.downloadNeeded(release)
+        if storage.isExternal {
+            if dl > 0 {
+                return "Keep Henge open and the \(Device.name) plugged in. Needs about \(ByteText.string(UInt64(release.macBytes))) free on this \(Device.name), and \(ByteText.string(UInt64(dl))) on external storage."
+            } else {
+                return "Keep Henge open and the \(Device.name) plugged in. Needs about \(ByteText.string(UInt64(release.macBytes))) free on this \(Device.name)."
+            }
+        }
+        return "Keep Henge open and the \(Device.name) plugged in. Needs about \(ByteText.string(UInt64(Installer.internalSpaceNeeded(release)))) free."
     }
 
     private func versionRow(_ r: MacOSRelease) -> some View {

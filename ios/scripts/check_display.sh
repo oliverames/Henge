@@ -23,6 +23,7 @@ xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot "$I
 xcrun --sdk macosx clang -arch arm64 "${COMMON[@]}" \
   -c devices/pvg_metal.m -o "$OUT/pvg-mac.o"
 make test-display-routing
+make test-download-storage
 
 # The C handoff must be compiled too: display attachment can race lazy GPU creation.
 for source in devices/pvg_lite.c host/vm.c; do

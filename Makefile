@@ -14,7 +14,7 @@ ENGINE = $(CORE) $(HOST)
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
-        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown
+        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown $(B)/test_ipsw_info
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
 
@@ -113,6 +113,9 @@ $(B)/hvsparse: tools/hvsparse_main.c host/hvsparse.c host/hvsparse.h | $(B)
 # Block-level tests: test_X.c plus X_programs.S, run natively and through the JIT.
 $(B)/test_devices: tests/test_devices.c tests/devices_programs.S tests/harness.S tests/harness.h $(ENGINE) $(DEV)
 	$(CC) $(CFLAGS) -Itests tests/test_devices.c tests/devices_programs.S tests/harness.S $(ENGINE) $(DEV) $(METAL_LIBS) -o $@
+# Reading a restore image's version and build (host/ipsw_info.c) with Homebrew's libzip and libplist.
+$(B)/test_ipsw_info: tests/test_ipsw_info.c host/ipsw_info.c host/ipsw_info.h | $(B)
+	$(CC) $(CFLAGS) -Ihost $(shell pkg-config --cflags libzip libplist-2.0) tests/test_ipsw_info.c host/ipsw_info.c $(shell pkg-config --libs libzip libplist-2.0) -o $@
 $(B)/test_%: tests/test_%.c tests/%_programs.S tests/harness.S tests/harness.h $(ENGINE)
 	$(CC) $(CFLAGS) -Itests tests/test_$*.c tests/$*_programs.S tests/harness.S $(ENGINE) -o $@
 
@@ -134,7 +137,7 @@ IOS_SDK = $(shell xcrun --sdk iphoneos --show-sdk-path)
 IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot $(IOS_SDK)
 # ios/deps/include/slirp first when it holds libslirp's headers (they are all the engine takes from there).
 IOS_DEPS ?= $(if $(wildcard ios/deps/include/slirp/libslirp.h),$(CURDIR)/ios/deps,$(HOME)/Documents/Coding/Husk/build/ios-arm64/sysroot)
-IOS_CFLAGS = -std=c11 -Wall -Wextra -O3 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp $(ENGINE_DEFS)
+IOS_CFLAGS = -std=c11 -Wall -Wextra -O3 -g -Icore -Ihost -Idevices -I"$(IOS_DEPS)/include/slirp" $(ENGINE_DEFS)
 IB = build/ios
 IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/fault_bench.c host/jit_region.c host/disk.c host/vm.c host/snapshot.c host/net_slirp.c host/dns_proxy.c host/share.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
           $(filter-out devices/pvg_mac.m,$(wildcard devices/*.c))
@@ -218,7 +221,7 @@ test-tl-glue: $(B)/test_tl_glue $(B)/tl-exit3
 .PHONY: test-tl-glue
 
 # The restore stack, built from the same sources and with the same stand-ins as iOS.
-$(B)/mac-restore/libhengerestore.a: tools/build_ios_restore.sh host/libusb_shim.c host/install.c host/curl_shim.m $(wildcard third_party/*/src/*.c) $(wildcard third_party/libirecovery/src/*.c)
+$(B)/mac-restore/libhengerestore.a: tools/build_ios_restore.sh host/libusb_shim.c host/install.c host/ipsw_info.c host/curl_shim.m $(wildcard third_party/*/src/*.c) $(wildcard third_party/libirecovery/src/*.c)
 	nice -n 10 tools/build_ios_restore.sh mac
 
 # The installer: libirecovery, usbmuxd and idevicerestore (third_party, vendored
@@ -301,3 +304,11 @@ test-jit-script:
 	node tests/test_henge_jit_script.js
 	$(JSC) tests/test_jit_script.js
 .PHONY: test-jit-script
+
+# Download storage selection and external disk space planning
+$(B)/test_download_storage: ios/Henge/DownloadStorage.swift tests/test_download_storage.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-download-storage: $(B)/test_download_storage
+	$(B)/test_download_storage
+.PHONY: test-download-storage
