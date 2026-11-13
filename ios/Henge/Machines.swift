@@ -36,6 +36,9 @@ enum GuestMemory {
     static func prepare(_ mac: VirtualMac) -> UInt64 {
         let file = mac.directory.appendingPathComponent("ram.tmp")
         setenv("HV_RAM_FILE", file.path, 1)
+        #if os(iOS)
+        henge_ios_release_high_room_for_sizing() // the holds make the largest mapping look small; nothing has them yet
+        #endif
         let free = (try? mac.directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage ?? 0
         let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
