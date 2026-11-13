@@ -39,7 +39,9 @@ final class DisplayRouter: ObservableObject {
     var externalDensity: Float?
     /// Gives the router the external display's density: its panel's pixels over its physical size.
     func setExternalDensity(_ pxmm: Float?) {
+        guard externalDensity != pxmm else { return }
         externalDensity = pxmm
+        if targets.isExternal { asked = nil }
         follow()
     }
 
@@ -138,10 +140,14 @@ final class DisplayRouter: ObservableObject {
         let next = targets.selected
         if next != selected {
             selected = next
+            asked = nil
             sendTarget()
             follow()
         }
-        if isExternal != targets.isExternal { isExternal = targets.isExternal }
+        if isExternal != targets.isExternal {
+            isExternal = targets.isExternal
+            setenv("HV_PVG_EXTERNAL", targets.isExternal ? "1" : "0", 1)
+        }
     }
 
     private func sendTarget() {

@@ -267,11 +267,12 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
     PUT32(0x18, 0x01000100);
     PUT32(0x1c, 0x400);
     PUT32(0x20, 3);
+    uint64_t size = atomic_load(&display_size);
+    if ((size >> 32) >= 2560) p->external = 1;
     /* +60 flags: 0 or 2 makes the driver mark the display external (no rounded-corner artwork); any other bit makes it
        the primary built-in panel. HV_PVG_EXTERNAL=1 keeps it external. */
     PUT32(0x60, p->external ? 0 : 1);
     p->display_gen = atomic_load(&display_gen);
-    uint64_t size = atomic_load(&display_size);
     p->display_mode = size, p->display_ppmm = atomic_load(&display_ppmm);
     display_put_modes(d, (uint32_t)(size >> 32), (uint32_t)size);
     PUTF(0xa10, 1.0f); /* identity colour matrix */
@@ -317,6 +318,10 @@ static void display_follow(HvPvgLite *p) {
     float ppmm = atomic_load(&display_ppmm);
     if (size == p->display_mode && ppmm == p->display_ppmm) return; /* nothing the guest has not got */
     p->display_mode = size, p->display_ppmm = ppmm;
+    if ((size >> 32) >= 2560) {
+        p->external = 1;
+        *(uint32_t *)(d + 0x60) = 0;
+    }
     display_put_modes(d, (uint32_t)(size >> 32), (uint32_t)size);
     display_announce(p, d, 0xc);
     fprintf(stderr, "hengevm: pvg-lite: display mode %ux%u (seq %u, +100 %x, mask %x)\n", (unsigned)(size >> 32), (unsigned)size,
@@ -872,7 +877,12 @@ static uint64_t gfx_read(void *opaque, uint64_t off, unsigned size) {
         v = __atomic_exchange_n(&p->status, 0, __ATOMIC_ACQ_REL);
         break;
     case 0x122c: v = 1; break;
-    case 0x1234: v = p->external ? 0 : 1; break; /* port 0 built in, not external */
+    case 0x1234: {
+        uint64_t cur = atomic_load(&display_size);
+        int ext = p->external || (cur >> 32) >= 2560 || (getenv("HV_PVG_EXTERNAL") && atoi(getenv("HV_PVG_EXTERNAL")));
+        v = ext ? 0 : 1;
+        break; /* port 0 built in (1) vs external (0) */
+    }
     case 0x1014: /* displays with an event, cleared by the read */
         v = __atomic_exchange_n(&p->display_bits, 0, __ATOMIC_ACQ_REL);
         if (v && p->display_reads_logged++ < 4) fprintf(stderr, "hengevm: pvg-lite: guest reads +1014 = %llx\n", (unsigned long long)v);
