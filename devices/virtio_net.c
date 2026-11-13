@@ -26,13 +26,13 @@ static void notify(HvVirtio *v, int q) {
     if (any) hv_virtio_interrupt(v);
 }
 
-int hv_virtio_net_receive(HvVirtioNet *n, const uint8_t *frame, uint32_t len) {
+static int push_rx(HvVirtioNet *n, const uint8_t *frame, uint32_t len, int *notify) {
     HvVirtio *v = &n->vio;
     static HvVirtqElem e;
     if (!(v->status & 4) || !v->q[RXQ].enabled || hv_virtq_pop(v, RXQ, &e) <= 0) return 0;
     if (hv_virtq_writable(&e) < HDR_LEN + len) { /* too small for it: drop the frame, return the buffer */
         hv_virtq_push(v, RXQ, &e, 0);
-        hv_virtio_interrupt(v);
+        *notify = 1;
         n->rx_dropped++;
         return 1;
     }
@@ -41,9 +41,24 @@ int hv_virtio_net_receive(HvVirtioNet *n, const uint8_t *frame, uint32_t len) {
     hv_virtq_write(v, &e, 0, hdr, HDR_LEN);
     hv_virtq_write(v, &e, HDR_LEN, frame, len);
     hv_virtq_push(v, RXQ, &e, HDR_LEN + len);
-    hv_virtio_interrupt(v);
+    *notify = 1;
     n->rx_frames++;
     return 1;
+}
+
+int hv_virtio_net_receive(HvVirtioNet *n, const uint8_t *frame, uint32_t len) {
+    int notify = 0;
+    int ok = push_rx(n, frame, len, &notify);
+    if (notify) hv_virtio_interrupt(&n->vio);
+    return ok;
+}
+
+int hv_virtio_net_receive_batch(HvVirtioNet *n, const uint8_t *const *frames,
+                                const uint32_t *lens, int count) {
+    int notify = 0, sent = 0;
+    while (sent < count && push_rx(n, frames[sent], lens[sent], &notify)) sent++;
+    if (notify) hv_virtio_interrupt(&n->vio);
+    return sent;
 }
 
 HvVirtioNet *hv_virtio_net_create(HvMachine *m, HvPcie *bus, const uint8_t mac[6]) {

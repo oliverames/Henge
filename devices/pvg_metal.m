@@ -2806,7 +2806,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
                     // A monitor can connect before its first drawable is available.
                     // Retry even if the guest is idle, but never poll a hidden target forever.
                     drawable_retry_pending = YES;
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), presenter, ^{
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 16 * NSEC_PER_MSEC), presenter, ^{
                         os_unfair_lock_lock(&self->screen_lock);
                         if (self->layer_generation == generation) {
                             self->drawable_retry_pending = NO;

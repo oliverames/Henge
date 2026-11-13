@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -149,7 +150,10 @@ static void timer_mod(void *timer, int64_t expire_ms, void *opaque) {
 }
 
 static void register_poll_socket(slirp_os_socket fd, void *opaque) {
-    (void)fd, (void)opaque;
+    (void)opaque;
+    int buf = 1 << 20;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
 }
 
 static void unregister_poll_socket(slirp_os_socket fd, void *opaque) {
@@ -264,18 +268,32 @@ static void transmit(void *opaque, const uint8_t *frame, uint32_t len) {
 
 void hv_net_poll(void) {
     if (!net) return;
+    enum { BATCH = 32 };
     for (;;) {
+        const uint8_t *frames[BATCH];
+        uint8_t *ptrs[BATCH];
+        uint32_t lens[BATCH];
+        int n = 0;
         pthread_mutex_lock(&to_guest.mu);
-        Frame f = {0, NULL};
-        if (to_guest.head != to_guest.tail) f = to_guest.f[to_guest.head % QUEUE];
+        uint32_t h = to_guest.head, t = to_guest.tail;
+        while (h != t && n < BATCH) {
+            Frame f = to_guest.f[h % QUEUE];
+            frames[n] = f.data;
+            ptrs[n] = f.data;
+            lens[n] = f.len;
+            n++;
+            h++;
+        }
         pthread_mutex_unlock(&to_guest.mu);
-        if (!f.data) return;
-        if (!hv_virtio_net_receive(net, f.data, f.len)) return; /* no buffer posted yet: try again later */
-        hv_net_rx_frames++;
+        if (!n) return;
+        int sent = hv_virtio_net_receive_batch(net, frames, lens, n);
+        if (sent <= 0) return; /* no buffer posted yet: try again later */
+        hv_net_rx_frames += (uint32_t)sent;
         pthread_mutex_lock(&to_guest.mu);
-        to_guest.head++;
+        to_guest.head += (uint32_t)sent;
         pthread_mutex_unlock(&to_guest.mu);
-        free(f.data);
+        for (int i = 0; i < sent; i++) free(ptrs[i]);
+        if (sent < n) return;
     }
 }
 

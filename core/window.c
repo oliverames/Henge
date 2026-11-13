@@ -27,7 +27,7 @@
 /* One never-mapped page past the window: an access that starts in its last page and runs past the end faults
    there and takes the TLB path, instead of reaching whatever the host has mapped next. */
 #define WGUARD WPAGE
-#define SLOTS 8192u /* hash slots: twice the pages it holds before starting over */
+#define SLOTS 32768u /* hash slots: twice the pages it holds before starting over */
 #define MAXPAGES (SLOTS / 2)
 
 typedef struct HvWindow {

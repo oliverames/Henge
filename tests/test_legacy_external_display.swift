@@ -7,6 +7,20 @@ nonisolated(unsafe) var engineLayer: UnsafeMutableRawPointer?
 @_cdecl("henge_vm_set_display_layer")
 func recordDisplayLayer(_ layer: UnsafeMutableRawPointer?) { engineLayer = layer }
 
+@_cdecl("henge_vm_set_display_live")
+func stubSetDisplayLive(_ width: UInt32, _ height: UInt32, _ pxPerMm: Float) {}
+
+@_cdecl("henge_vm_display_size")
+func stubDisplaySize(_ width: UnsafeMutablePointer<UInt32>?, _ height: UnsafeMutablePointer<UInt32>?) -> Int32 { -1 }
+
+enum HengeLog {
+    static func log(_ category: String, _ message: String) {}
+}
+
+enum Device {
+    static let retinaPPI: Double = 460
+}
+
 /// An external display scene as the app has it: records what it was told. Showing the Mac
 /// attaches a layer the way the real screen view does; stopping it never detaches, because
 /// iOS may never tear the view down once the monitor is gone.
