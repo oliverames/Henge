@@ -194,7 +194,7 @@ void hv_pvg_lite_set_mode(uint32_t width, uint32_t height) {
     if (atomic_exchange(&display_size, want) != want) atomic_fetch_add(&display_gen, 1);
 }
 
-/* The mode list and what goes with it, as the guest reads it: physical size, then the one mode at its rate. */
+/* The mode list and what goes with it, as the guest reads it: physical size, then the mode list at its rate. */
 static void display_put_modes(uint8_t *d, uint32_t w, uint32_t h) {
 #define PUT32(off, v) (*(uint32_t *)(d + (off)) = (uint32_t)(v))
 #define PUTF(off, v) (*(float *)(d + (off)) = (v))
@@ -204,8 +204,11 @@ static void display_put_modes(uint8_t *d, uint32_t w, uint32_t h) {
     PUT32(0x14, height_mm << 16 | width_mm);
     PUTF(0x24, (float)width_mm);
     PUTF(0x28, (float)height_mm);
-    PUT32(0x4c, height_mm << 16 | width_mm);
+    /* +4c is two uint16_t (originX, originY), initialized by AppleParavirtDisplay::setupSharedState to 0xffff, 0xffff.
+       createDisplayAttributes skips originX/originY when *(uint32_t *)(d + 0x4c) == 0xffffffff. */
+    PUT32(0x4c, 0xffffffffu);
     d[0x50] = (ppmm >= 5.0f) ? 2 : 1;
+    *(uint64_t *)(d + 0x58) += 1; /* configEpoch */
     const char *hz = getenv("HV_HZ");
     uint32_t r = hz && atoi(hz) > 0 ? (uint32_t)atoi(hz) : 60;
     typedef struct { uint32_t w, h; } Mode;
@@ -247,8 +250,9 @@ static void display_event(HvPvgLite *p, uint8_t *d, uint32_t bits) {
     }
 }
 
-/* A mode list for the guest to ack: the next sequence number, ack pending, the events (4 the first time, the hotplug;
-   0xc for a change after an ack), and the state (1, waiting for the ack) stored last. */
+/* A mode list for the guest to ack: the next sequence number, ack pending, the event bit (4 = connect/reconfigure;
+   bit 3 = 8 is disconnect/destroyDisplayAttributes in AppleParavirtDisplay::handleHostInterrupt, so never set 8 for a
+   mode change), and the state (1, waiting for the ack) stored last. */
 static void display_announce(HvPvgLite *p, uint8_t *d, uint32_t events) {
     p->display_seq++;
     *(uint32_t *)(d + 0x200) = p->display_seq;
@@ -264,6 +268,7 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
 #define PUT32(off, v) (*(uint32_t *)(d + (off)) = (uint32_t)(v))
 #define PUTF(off, v) (*(float *)(d + (off)) = (v))
     PUT32(0x00, 1);
+    memcpy(d + 0x04, "Apple Display", 14);
     PUT32(0x18, 0x01000100);
     PUT32(0x1c, 0x400);
     PUT32(0x20, 3);
@@ -272,6 +277,7 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
     /* +60 flags: 0 or 2 makes the driver mark the display external (no rounded-corner artwork); any other bit makes it
        the primary built-in panel. HV_PVG_EXTERNAL=1 keeps it external. */
     PUT32(0x60, p->external ? 0 : 1);
+    *(uint64_t *)(d + 0x68) = 0; /* protectionOptions */
     p->display_gen = atomic_load(&display_gen);
     p->display_mode = size, p->display_ppmm = atomic_load(&display_ppmm);
     display_put_modes(d, (uint32_t)(size >> 32), (uint32_t)size);
@@ -323,7 +329,7 @@ static void display_follow(HvPvgLite *p) {
         *(uint32_t *)(d + 0x60) = 0;
     }
     display_put_modes(d, (uint32_t)(size >> 32), (uint32_t)size);
-    display_announce(p, d, 0xc);
+    display_announce(p, d, 4);
     fprintf(stderr, "hengevm: pvg-lite: display mode %ux%u (seq %u, +100 %x, mask %x)\n", (unsigned)(size >> 32), (unsigned)size,
             p->display_seq, *(uint32_t *)(d + 0x100), *(uint32_t *)(d + 0x104));
 }
@@ -825,31 +831,16 @@ static void do_mapper(HvPvgLite *p) {
     hv_gicv3_pend(p->gic, p->iosfc_irq);
 }
 
-/* Device work no doorbell took care of: a channel that had to wait for another one's work. */
-/* The display's refresh: event 8 while the guest asks for it in its mask (+104), and the refresh's time at +68.
-   AppleParavirtDisplay's vblank query reads +68 of this page; left 0, WindowServer logs "Timer delayed by
-   <uptime>s" and triggers an interrupt/thread-switch storm. Without event 8 a video wallpaper stops when nothing
-   else draws. Sent at the mode's rate (HV_HZ). HV_PVG_VBLANK=0: neither. */
+/* Device work no doorbell took care of: a channel that had to wait for another one's work.
+   Note on display page +100/+104 and +68 in AppleParavirtDisplay (macOS 27):
+   - start_hardware writes 0xc (bits 2 and 3) to +104 (interrupt mask).
+   - handleHostInterrupt checks bit 2 (0x4 = connect/reconfigure -> createDisplayAttributes) and
+     bit 3 (0x8 = disconnect/unplug -> destroyDisplayAttributes). Raising bit 3 on a timer tears
+     down DisplayAttributes 60 times a second, preventing WindowServer from bringing the display up.
+   - +68 is protectionOptions (uint64_t), read by get_protection_options; vblank timing is driven by
+     AppleParavirtDisplay's own IOTimerEventSource. */
 static void vblank(HvPvgLite *p) {
-    static int on = -1;
-    static uint64_t period, next;
-    if (on < 0) {
-        on = !getenv("HV_PVG_VBLANK") || atoi(getenv("HV_PVG_VBLANK"));
-        const char *hz = getenv("HV_HZ");
-        uint64_t r = hz && atoi(hz) > 0 ? (uint64_t)atoi(hz) : 60;
-        period = 24000000ull / r; /* host counter ticks (24 MHz) */
-    }
-    if (!on || !p->display_pa) return;
-    uint8_t *d = hv_phys_ptr(p->m, p->display_pa, 0x4000);
-    if (!d) return;
-    uint64_t now = mach_absolute_time();
-    if (now < next) return;
-    next = now + period;
-    /* Guest virtual counter (CNTVCT_EL0) before raising the refresh event. */
-    __atomic_store_n((uint64_t *)(d + 0x68), now - p->m->cntvoff, __ATOMIC_RELEASE);
-    if (!(__atomic_load_n((uint32_t *)(d + 0x104), __ATOMIC_ACQUIRE) & 8)) return;
-    display_event(p, d, 8);
-    p->vblanks++;
+    (void)p;
 }
 
 void hv_pvg_lite_poll(HvPvgLite *p) {
