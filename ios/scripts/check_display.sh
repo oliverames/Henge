@@ -7,7 +7,7 @@ mkdir -p "$OUT"
 IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 SOURCES=()
 while IFS= read -r source; do SOURCES+=("$source"); done < <(find ios/Henge -name '*.swift' -print | sort)
-SOURCES+=(ios/HengeJITHelper/HengeJITMessages.swift)
+SOURCES+=(ios/HengeJITHelper/HengeJITMessages.swift ios/HengeJITHelper/RemotePairingChoice.swift)
 
 # Compile the complete Swift app against the real SDK, keeping the iOS 17 deployment target.
 # Linking/package export still require the dependencies described in ios/README.md.
