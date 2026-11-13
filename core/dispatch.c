@@ -48,10 +48,13 @@ void hv_flush_blocks(HvMachine *m) {
         }
     memset(m->hash, 0, sizeof m->hash);
     m->nblocks = 0;
-    m->blocks_wrap = 0;
+    hv_reset_block_chunks(m);
     m->nslots = 0;
     m->nslot_free = m->slot_take = 0;
     m->nxchained = 0;
+    m->slot_trash_head = 0;
+    memset(m->tseg_head, 0, sizeof m->tseg_head);
+    for (int i = 0; i < HV_JIT_MAX_SEGS; i++) m->seg_slots_len[i] = 0;
     for (int i = 0; i < m->nram; i++) memset(m->ram[i].xhead, 0, m->ram[i].npages * sizeof *m->ram[i].xhead); /* slots restart from 0 */
     hv_jit_reset(&m->jit);
     m->jit.limit = hv_knob[HV_K_JITCAP] > 0 ? ((size_t)hv_knob[HV_K_JITCAP] << 20) / sizeof(uint32_t) : 0; /* MB of it to use (testing) */
@@ -90,55 +93,82 @@ void hv_evict_blocks(HvMachine *m) {
             hv_ret_clear(m->cpus[i]);
             memset(m->percpu[i].jc, 0, sizeof m->percpu[i].jc);
         }
-    /* Blocks: keep the others in the order they were made (blocks whose page's code changed since go too: nothing
-       can look them up again), and hash them anew. The ones made before the ring came round to here first. */
-    int n = 0, wrap = 0;
-    const uint32_t *end = r->base + r->end;
-    for (int i = 0; i < m->nblocks; i++) {
-        HvBlock *b = &m->blocks[i];
-        if (GONE(b->code) || __atomic_load_n(&b->ram->page_gen[b->pg], __ATOMIC_RELAXED) != b->gen) continue;
-        if (n != i) m->blocks[n] = *b;
-        if (m->blocks[n].code >= end && wrap == n) wrap = n + 1;
-        n++;
+    /* Phase 0: drop only the blocks in the evicted segment and unlink them from the hash table. */
+    uint32_t dropped = 0;
+    memset(m->hash_seen, 0, (HV_BLOCK_HASH / 32) * sizeof *m->hash_seen);
+    uint32_t first_c = m->seg_chunk_head[seg], last_c = m->seg_chunk_tail[seg];
+    for (uint32_t c = first_c; c != ~0u; c = m->chunk_next[c]) {
+        uint32_t len = m->chunk_len[c];
+        HvBlock *arr = &m->blocks[(size_t)c * m->block_chunk];
+        for (uint32_t i = 0; i < len; i++) {
+            HvBlock *b = &arr[i];
+            uint32_t h = hv_block_hash(b->va, b->pa, b->flags);
+            if (!((m->hash_seen[h >> 5] >> (h & 31)) & 1u)) {
+                m->hash_seen[h >> 5] |= 1u << (h & 31);
+                HvBlock **pp = &m->hash[h];
+                while (*pp) {
+                    HvBlock *cur = *pp;
+                    if (GONE(cur->code)) *pp = cur->next;
+                    else pp = &cur->next;
+                }
+            }
+        }
+        dropped += len;
+        m->chunk_len[c] = 0;
     }
-    m->stats.evict_blocks += (uint64_t)(m->nblocks - n);
-    m->nblocks = n;
-    m->blocks_wrap = (uint32_t)wrap;
-    memset(m->hash, 0, sizeof m->hash);
-    for (int i = 0; i < n; i++) {
-        HvBlock *b = &m->blocks[i];
-        uint32_t h = hv_block_hash(b->va, b->pa, b->flags);
-        b->next = m->hash[h];
-        m->hash[h] = b;
+    if (first_c != ~0u) {
+        m->chunk_next[last_c] = m->free_chunk_head;
+        m->free_chunk_head = first_c;
+        m->seg_chunk_head[seg] = m->seg_chunk_tail[seg] = ~0u;
     }
+    m->nblocks -= (int)dropped;
+    m->stats.evict_blocks += dropped;
     uint64_t t1 = mach_absolute_time();
     m->stats.evict_phase[0] += t1 - t0;
     /* The words rewritten below, for one instruction-cache pass at the end. */
     static uint32_t **words;
     static size_t nwords_cap;
     size_t nwords = 0;
-    /* Slots: free those whose exit was in the segment (or never placed), unchain those leading into it, and list the
-       chained exits to other pages again by target page (some on the lists went, and the lists run through them). */
-    for (int i = 0; i < m->nram; i++) memset(m->ram[i].xhead, 0, m->ram[i].npages * sizeof *m->ram[i].xhead);
-    m->nxchained = 0;
-    uint32_t nslots = m->nslots < m->max_slots ? m->nslots : m->max_slots, nfree = 0;
-    for (uint32_t idx = 0; idx < nslots; idx++) {
-        uint32_t *site = m->slot_site[idx];
-        if (!site || GONE(site)) {
-            m->slots[idx] = 0;
-            m->slot_site[idx] = NULL;
-            m->slot_cond[idx] = NULL;
-            m->slot_xpa[idx] = 0;
-            m->slot_xnext[idx] = 0;
-            m->slot_free[nfree++] = idx;
-            continue;
-        }
+    /* Phase 1: keep unconsumed free slots, drain discarded slots, free all slots owned by the evicted segment,
+       and unchain surviving exits elsewhere that led into the evicted segment. */
+    uint32_t nfree = 0;
+    if (m->slot_take < m->nslot_free) {
+        nfree = m->nslot_free - m->slot_take;
+        memmove(m->slot_free, m->slot_free + m->slot_take, nfree * sizeof *m->slot_free);
+    }
+    for (uint32_t k = m->slot_trash_head; k;) {
+        uint32_t idx = k - 1u;
+        k = m->slot_xnext[idx];
         m->slot_xnext[idx] = 0;
-        uint64_t to = m->slots[idx];
-        if (to && GONE(to)) {
-            m->slots[idx] = 0;
-            m->slot_xpa[idx] = 0;
-            uint32_t insn = 0x14000000u | (uint32_t)((m->slot_stub[idx] - site) & 0x3ffffff); /* back to its stub */
+        m->slot_free[nfree++] = idx;
+    }
+    m->slot_trash_head = 0;
+    uint32_t *ss = m->seg_slots[seg];
+    uint32_t nss = m->seg_slots_len[seg];
+    for (uint32_t i = 0; i < nss; i++) {
+        uint32_t idx = ss[i];
+        if (m->slot_tseg[idx]) hv_slot_tlist_unlink(m, idx);
+        if (m->slot_xpa[idx]) hv_slot_xlist_unlink(m, idx);
+        m->slots[idx] = 0;
+        m->slot_site[idx] = 0;
+        m->slot_stub[idx] = 0;
+        m->slot_cond[idx] = 0;
+        m->slot_xa[idx] = 0;
+        m->slot_free[nfree++] = idx;
+    }
+    m->seg_slots_len[seg] = 0;
+    for (uint32_t k = m->tseg_head[seg]; k;) {
+        uint32_t idx = k - 1u;
+        k = m->slot_tnext[idx];
+        m->slot_tnext[idx] = 0;
+        m->slot_tprev[idx] = 0;
+        m->slot_tseg[idx] = 0;
+        m->slots[idx] = 0;
+        if (m->slot_xpa[idx]) hv_slot_xlist_unlink(m, idx);
+        uint32_t *site = hv_slot_dec(m, m->slot_site[idx]);
+        uint32_t *stub = hv_slot_dec(m, m->slot_stub[idx]);
+        if (site && stub) {
+            uint32_t insn = 0x14000000u | (uint32_t)((stub - site) & 0x3ffffff); /* back to its stub */
             if (nwords + 2 > nwords_cap) {
                 size_t cap = nwords_cap ? nwords_cap * 2 : 65536;
                 uint32_t **w = realloc(words, cap * sizeof *w);
@@ -147,7 +177,7 @@ void hv_evict_blocks(HvMachine *m) {
             }
             hv_jit_write(r, site, &insn, 4);
             words[nwords++] = site;
-            uint32_t *cond = m->slot_cond[idx];
+            uint32_t *cond = hv_slot_dec(m, m->slot_cond[idx]);
             if (cond) { /* the hot part's conditional branch went to the exit's B before it was chained */
                 insn = *cond;
                 if (hv_branch_retarget(&insn, site - cond)) {
@@ -155,18 +185,10 @@ void hv_evict_blocks(HvMachine *m) {
                     words[nwords++] = cond;
                 }
             }
-            m->stats.evict_unchained++;
-            continue;
         }
-        uint64_t xpa = m->slot_xpa[idx];
-        if (xpa) {
-            HvRam *ram = hv_ram_lookup(m, xpa & ~1ull);
-            uint64_t pg = (xpa - ram->pa) >> HV_TLB_PAGE_BITS;
-            m->slot_xnext[idx] = ram->xhead[pg];
-            ram->xhead[pg] = idx + 1;
-            m->nxchained++;
-        }
+        m->stats.evict_unchained++;
     }
+    m->tseg_head[seg] = 0;
     m->nslot_free = nfree;
     m->slot_take = 0;
     uint64_t t2 = mach_absolute_time();
@@ -258,6 +280,44 @@ static void block_dump(const HvBlock *b, const uint32_t *code) {
     pthread_mutex_unlock(&mu);
 }
 
+static inline void tr_lock(HvMachine *m) {
+    if (pthread_mutex_trylock(&m->tr_mu) == 0) return;
+    uint64_t w0 = m->stats_interval ? mach_absolute_time() : 0;
+    int got = 0;
+    /* Brief user-space spin before falling back to syscalls when another CPU is mid-publish. */
+    for (int spin = 1; spin <= 128 && !got; spin++) {
+#if defined(__aarch64__)
+        __asm__ volatile("yield");
+#endif
+        if ((spin & 7) == 0) got = pthread_mutex_trylock(&m->tr_mu) == 0;
+    }
+    for (int y = 0; y < 8 && !got; y++) {
+        sched_yield();
+        got = pthread_mutex_trylock(&m->tr_mu) == 0;
+    }
+    if (!got) pthread_mutex_lock(&m->tr_mu);
+    if (m->stats_interval) {
+        m->stats.tr_waits++;
+        m->stats.tr_wait_ticks += mach_absolute_time() - w0;
+    }
+}
+
+static HvBlock *alloc_block_in_seg(HvMachine *m, uint32_t seg) {
+    uint32_t c = m->seg_chunk_tail[seg];
+    if (c == ~0u || m->chunk_len[c] >= m->block_chunk) {
+        c = m->free_chunk_head;
+        if (c == ~0u) return NULL;
+        m->free_chunk_head = m->chunk_next[c];
+        m->chunk_len[c] = 0;
+        m->chunk_seg[c] = (uint16_t)seg;
+        m->chunk_next[c] = ~0u;
+        if (m->seg_chunk_head[seg] == ~0u) m->seg_chunk_head[seg] = c;
+        else m->chunk_next[m->seg_chunk_tail[seg]] = c;
+        m->seg_chunk_tail[seg] = c;
+    }
+    return &m->blocks[(size_t)c * m->block_chunk + m->chunk_len[c]++];
+}
+
 static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, const uint32_t *code, uint32_t avail) {
     HvMachine *m = cpu->m;
     int failed = 0;
@@ -302,6 +362,7 @@ static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, con
     /* ...and place it in the region (space is reserved atomically, so no lock either)... */
     size_t used0 = m->jit.used;
     if (hv_translate_place(m, &nb) != 0) { /* JIT region full: make room */
+        hv_translate_discard_slots(m);
         pthread_mutex_lock(&m->tr_mu);
         if (!m->jit.seg_words) m->stats.flush_full++;
         goto evict;
@@ -310,38 +371,30 @@ static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, con
         fprintf(stderr, "hengevm: cpu %u translated across a flush: gen %u to %u, placed at rx+%llx, used %llx, active %d\n", cpu->index, nb.jit_gen, m->jit_gen, (unsigned long long)(nb.code - m->jit.base) * 4, (unsigned long long)m->jit.used * 4, cpu->pc_state->active);
     block_dump(&nb, code);
     /* ...then take the lock only to publish it. */
-    if (pthread_mutex_trylock(&m->tr_mu) != 0) {
-        uint64_t w0 = m->stats_interval ? mach_absolute_time() : 0;
-        int got = 0;
-        /* Brief user-space spin before falling back to syscalls when another CPU is mid-publish. */
-        for (int spin = 1; spin <= 128 && !got; spin++) {
-#if defined(__aarch64__)
-            __asm__ volatile("yield");
-#endif
-            if ((spin & 7) == 0) got = pthread_mutex_trylock(&m->tr_mu) == 0;
-        }
-        for (int y = 0; y < 8 && !got; y++) {
-            sched_yield();
-            got = pthread_mutex_trylock(&m->tr_mu) == 0;
-        }
-        if (!got) pthread_mutex_lock(&m->tr_mu);
-        if (m->stats_interval) {
-            m->stats.tr_waits++;
-            m->stats.tr_wait_ticks += mach_absolute_time() - w0;
-        }
-    }
+    tr_lock(m);
     b = find(m, h, va, pa, flags, gen); /* another CPU may have just made it: ours is dropped (its space stays used until its segment is taken back) */
     if (b) {
+        hv_translate_discard_slots(m);
         pthread_mutex_unlock(&m->tr_mu);
         jc[j].va = va, jc[j].b = b;
         return b;
     }
-    if (m->flush_pending) goto flush;
-    if ((uint32_t)m->nblocks >= m->max_blocks) {
+    if (m->flush_pending) {
+        hv_translate_discard_slots(m);
+        goto flush;
+    }
+    uint32_t seg = hv_translate_placed_seg();
+    uint32_t tc = m->seg_chunk_tail[seg];
+    if ((tc == ~0u || m->chunk_len[tc] >= m->block_chunk) && m->free_chunk_head == ~0u) {
         if (!m->jit.seg_words) m->stats.flush_full++;
+        hv_translate_discard_slots(m);
         goto evict;
     }
-    b = &m->blocks[m->nblocks];
+    if (hv_translate_commit_slots(m) != 0) {
+        hv_translate_discard_slots(m);
+        goto evict;
+    }
+    b = alloc_block_in_seg(m, seg);
     *b = nb;
     m->stats.translations++;
     if (m->stats_interval) {
@@ -919,48 +972,39 @@ static void print_stats(HvCpu *cpu, int force) {
    jump gets a block that just wrote its own page back to the dispatcher. */
 static void chain(HvMachine *m, uint64_t *slot, HvBlock *b) {
     uint32_t idx = (uint32_t)(slot - m->slots);
-    if (m->gen_checks && (b->jit_gen != m->jit_gen || (m->slot_site[idx] && (uint64_t)(m->slot_site[idx] - m->jit.base) >= hv_jit_extent(&m->jit))))
-        fprintf(stderr, "hengevm: chain slot %u site %p to rx+%llx va %llx: block gen %u now %u\n", idx, (void *)m->slot_site[idx], (unsigned long long)(b->code - m->jit.base) * 4, (unsigned long long)b->va, b->jit_gen, m->jit_gen);
+    uint32_t *site = hv_slot_dec(m, m->slot_site[idx]);
+    if (m->gen_checks && (b->jit_gen != m->jit_gen || (site && (uint64_t)(site - m->jit.base) >= hv_jit_extent(&m->jit))))
+        fprintf(stderr, "hengevm: chain slot %u site %p to rx+%llx va %llx: block gen %u now %u\n", idx, (void *)site, (unsigned long long)(b->code - m->jit.base) * 4, (unsigned long long)b->va, b->jit_gen, m->jit_gen);
     uint64_t xa = m->slot_xa[idx];
+    uint64_t page_pa = b->pa & ~((1ull << HV_TLB_PAGE_BITS) - 1);
     if (xa) {
         /* From another page: only to the block in the physical page the exit's
            check names, and not a stale one (see hv_invalidate_code). */
-        uint64_t page_pa = b->pa & ~((1ull << HV_TLB_PAGE_BITS) - 1);
         uint64_t host = (uint64_t)(uintptr_t)(b->ram->host + (page_pa - b->ram->pa));
         if (host - (b->va & ~((1ull << HV_TLB_PAGE_BITS) - 1)) != xa) return;
-        pthread_mutex_lock(&m->tr_mu);
-        if (__atomic_load_n(&b->ram->page_gen[b->pg], __ATOMIC_ACQUIRE) != b->gen || m->slot_xpa[idx]) {
-            pthread_mutex_unlock(&m->tr_mu);
-            return;
-        }
-        m->slot_xpa[idx] = page_pa | 1;
-        m->slot_xnext[idx] = b->ram->xhead[b->pg]; /* on the target page's list (hv_invalidate_code) */
-        b->ram->xhead[b->pg] = idx + 1;
-        m->nxchained++;
-        __atomic_store_n(slot, (uint64_t)(uintptr_t)b->code, __ATOMIC_RELEASE);
-        uint32_t *site = m->slot_site[idx];
-        int64_t off = site ? b->code - site : 0;
-        if (site && off >= -(1 << 25) && off < (1 << 25)) {
-            uint32_t insn = 0x14000000u | (uint32_t)(off & 0x3ffffff);
-            hv_jit_write(&m->jit, site, &insn, 4);
-            hv_jit_finish_branch(&m->jit, site); /* B to B; the stub follows the slot meanwhile */
-        }
-        m->stats.chained++;
-        if (m->stats_interval) m->stats.xchained++;
+    }
+    tr_lock(m);
+    if (__atomic_load_n(&b->ram->page_gen[b->pg], __ATOMIC_ACQUIRE) != b->gen || m->slot_tseg[idx] || m->slots[idx] || (xa && m->slot_xpa[idx])) {
         pthread_mutex_unlock(&m->tr_mu);
         return;
     }
+    uint32_t tseg = hv_jit_seg_of(m, b->code);
+    hv_slot_tlist_insert(m, tseg, idx);
+    if (xa) {
+        m->slot_xpa[idx] = page_pa | 1;
+        hv_slot_xlist_insert(m, b->ram, b->pg, idx); /* on the target page's list (hv_invalidate_code) */
+    }
     __atomic_store_n(slot, (uint64_t)(uintptr_t)b->code, __ATOMIC_RELEASE);
     /* And the stub's B, when the target is in its range: a direct branch, no load. */
-    uint32_t *site = m->slot_site[slot - m->slots];
+    site = hv_slot_dec(m, m->slot_site[idx]);
     int64_t off = site ? b->code - site : 0;
     if (site && off >= -(1 << 25) && off < (1 << 25)) {
         uint32_t insn = 0x14000000u | (uint32_t)(off & 0x3ffffff);
         hv_jit_write(&m->jit, site, &insn, 4);
         hv_jit_finish_branch(&m->jit, site); /* B to B; the stub follows the slot meanwhile */
     }
-    uint32_t *cond = m->slot_cond[idx];
-    if (cond) { /* the conditional branch to that stub, too */
+    uint32_t *cond = hv_slot_dec(m, m->slot_cond[idx]);
+    if (!xa && cond) { /* the conditional branch to that stub, too */
         uint32_t insn = *cond;
         if (hv_branch_retarget(&insn, b->code - cond)) {
             hv_jit_write(&m->jit, cond, &insn, 4);
@@ -968,6 +1012,8 @@ static void chain(HvMachine *m, uint64_t *slot, HvBlock *b) {
         }
     }
     m->stats.chained++;
+    if (xa && m->stats_interval) m->stats.xchained++;
+    pthread_mutex_unlock(&m->tr_mu);
 }
 
 static int run_loop(HvCpu *cpu, int one);

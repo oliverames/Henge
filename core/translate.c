@@ -90,6 +90,7 @@ typedef struct {
     struct { uint32_t slot, at, flags, stub, cond_at; uint64_t target; uint8_t cold, stub_cold, has_cond; } site[MAX_OOL]; /* chainable exits: their slot, the B chaining patches, its stub, where to; the hot part's conditional branch to it if chaining may patch that too */
     int site_direct;    /* the exit just written needs nothing done before its B: no check, no restores */
     uint32_t nsite;
+    uint32_t place_seg;
     uint32_t pool_at;    /* where the literal pool is, in the cold part */
     uint32_t flags;
     int slow_mem;
@@ -422,10 +423,16 @@ static void put_branch_exit(Emit *e, uint64_t target, int plain) {
     }
     uint64_t *slot = &e->m->slots[slot_index];
     *slot = 0;
-    e->m->slot_site[slot_index] = NULL; /* until placed: what it held is a dropped block's */
-    e->m->slot_cond[slot_index] = NULL;
+    e->m->slot_site[slot_index] = 0; /* until placed: what it held is a dropped block's */
+    e->m->slot_stub[slot_index] = 0;
+    e->m->slot_cond[slot_index] = 0;
     e->m->slot_xa[slot_index] = xa;
     e->m->slot_xpa[slot_index] = 0;
+    e->m->slot_xnext[slot_index] = 0;
+    e->m->slot_xprev[slot_index] = 0;
+    e->m->slot_tseg[slot_index] = 0;
+    e->m->slot_tprev[slot_index] = 0;
+    e->m->slot_tnext[slot_index] = 0;
     uint32_t to_exit = ~0u;
     if (check) {
         put(e, 0xb9400000u | (HV_CPU_EXIT_REQ / 4) << 10 | 28 << 5 | 15); /* ldr w15, [x28, #exit_req] */
@@ -1994,8 +2001,13 @@ static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32
 int hv_translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32_t avail) {
     /* HV_GROUPS=1: group accesses (off by default: measured no faster, and the
        plain copies make the code about 15% bigger, so the JIT region fills sooner). */
-    if (hv_knob[HV_K_GROUPS] && translate_emit(m, b, code, avail, 0) == 0) return 0;
-    return translate_emit(m, b, code, avail, 1);
+    if (hv_knob[HV_K_GROUPS]) {
+        if (translate_emit(m, b, code, avail, 0) == 0) return 0;
+        hv_translate_discard_slots(m);
+    }
+    if (translate_emit(m, b, code, avail, 1) == 0) return 0;
+    hv_translate_discard_slots(m);
+    return -1;
 }
 
 static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32_t avail, int nogroup) {
@@ -2121,6 +2133,7 @@ int hv_translate_place(HvMachine *m, HvBlock *b) {
     uint32_t pad = hv_knob[HV_K_TEST1] & ~1u; /* HV_K1: words of nothing after each block's hot part, to see what density is worth */
     uint32_t *dst, *cold;
     if (chunk_take(m, e->nhot + pad, e->ncold, &dst, &cold) != 0) return -1;
+    e->place_seg = m->jit.seg_words ? chunk.seg : 0u;
     for (uint32_t k = 0; k < e->nrel; k++) {
         uint32_t at = e->rel[k].at, target = e->rel[k].target;
         if (e->rel[k].from_cold) patch_branch(&e->cold[at], (dst + target) - (cold + at));
@@ -2161,10 +2174,52 @@ int hv_translate_place(HvMachine *m, HvBlock *b) {
     hv_jit_finish2(&m->jit, dst, e->nhot, e->flat ? NULL : cold, e->flat ? 0 : e->ncold); /* one wait for both parts */
     b->code = dst;
     for (uint32_t k = 0; k < e->nsite; k++) {
-        m->slot_site[e->site[k].slot] = (e->site[k].cold ? cold : dst) + e->site[k].at;
-        m->slot_stub[e->site[k].slot] = (e->site[k].stub_cold ? cold : dst) + e->site[k].stub;
-        m->slot_cond[e->site[k].slot] = e->site[k].has_cond ? dst + e->site[k].cond_at : NULL;
+        m->slot_site[e->site[k].slot] = hv_slot_enc(m, (e->site[k].cold ? cold : dst) + e->site[k].at);
+        m->slot_stub[e->site[k].slot] = hv_slot_enc(m, (e->site[k].stub_cold ? cold : dst) + e->site[k].stub);
+        m->slot_cond[e->site[k].slot] = e->site[k].has_cond ? hv_slot_enc(m, dst + e->site[k].cond_at) : 0u;
     }
+    return 0;
+}
+
+uint32_t hv_translate_placed_seg(void) { return E.place_seg; }
+
+void hv_translate_discard_slots(HvMachine *m) {
+    Emit *e = &E;
+    for (uint32_t k = 0; k < e->nsite; k++) {
+        uint32_t idx = e->site[k].slot;
+        m->slots[idx] = 0;
+        m->slot_site[idx] = 0;
+        m->slot_stub[idx] = 0;
+        m->slot_cond[idx] = 0;
+        m->slot_xa[idx] = 0;
+        m->slot_xpa[idx] = 0;
+        m->slot_tseg[idx] = 0;
+        hv_slot_trash_push(m, idx);
+    }
+    e->nsite = 0;
+}
+
+int hv_translate_commit_slots(HvMachine *m) {
+    Emit *e = &E;
+    if (!e->nsite) return 0;
+    uint32_t seg = e->place_seg;
+    if (m->seg_slots_len[seg] + e->nsite > m->seg_slots_cap[seg]) {
+        uint32_t cap = m->seg_slots_cap[seg] ? m->seg_slots_cap[seg] * 2u : 4096u;
+        while (cap < m->seg_slots_len[seg] + e->nsite) cap *= 2u;
+        uint32_t *arr = realloc(m->seg_slots[seg], (size_t)cap * sizeof *arr);
+        if (!arr) return -1;
+        m->seg_slots[seg] = arr;
+        m->seg_slots_cap[seg] = cap;
+    }
+    for (uint32_t k = 0; k < e->nsite; k++) {
+        uint32_t idx = e->site[k].slot;
+        m->seg_slots[seg][m->seg_slots_len[seg]++] = idx;
+        if (m->slots[idx]) {
+            uint32_t tseg = hv_jit_seg_of(m, (const uint32_t *)(uintptr_t)m->slots[idx]);
+            hv_slot_tlist_insert(m, tseg, idx);
+        }
+    }
+    e->nsite = 0;
     return 0;
 }
 

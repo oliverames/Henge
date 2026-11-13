@@ -48,6 +48,7 @@ int hv_knob_set(HvMachine *m, const char *name, int value) {
 }
 
 int hv_machine_init(HvMachine *m, size_t jit_bytes) {
+    knobs_init();
     memset(m, 0, sizeof *m);
     if (hv_jit_region_open(&m->jit, jit_bytes) != 0) return -1;
     return init_rest(m);
@@ -108,8 +109,16 @@ static int init_rest(HvMachine *m) {
     size_t bytes = m->jit.capacity * sizeof(uint32_t);
     m->max_blocks = (uint32_t)(bytes / 160 < 4096 ? 4096 : bytes / 160);
     m->max_slots = m->max_blocks * 2;
+    m->block_chunk = m->max_blocks >= (1u << 16) ? 4096u : 32u;
+    m->nblock_chunks = m->max_blocks / m->block_chunk;
     m->blocks = calloc(m->max_blocks, sizeof(HvBlock));
     if (!m->blocks) return -1;
+    m->chunk_len = calloc(m->nblock_chunks ? m->nblock_chunks : 1, sizeof *m->chunk_len);
+    m->chunk_seg = calloc(m->nblock_chunks ? m->nblock_chunks : 1, sizeof *m->chunk_seg);
+    m->chunk_next = calloc(m->nblock_chunks ? m->nblock_chunks : 1, sizeof *m->chunk_next);
+    m->hash_seen = calloc(HV_BLOCK_HASH / 32, sizeof *m->hash_seen);
+    if (!m->chunk_len || !m->chunk_seg || !m->chunk_next || !m->hash_seen) return -1;
+    hv_reset_block_chunks(m);
     m->stop_pc = ~0ull;
     m->stop_pc2 = ~0ull;
     m->chain = 1;
@@ -120,13 +129,18 @@ static int init_rest(HvMachine *m) {
     m->slot_xa = calloc(m->max_slots, sizeof *m->slot_xa);
     m->slot_xpa = calloc(m->max_slots, sizeof *m->slot_xpa);
     m->slot_xnext = calloc(m->max_slots, sizeof *m->slot_xnext);
+    m->slot_xprev = calloc(m->max_slots, sizeof *m->slot_xprev);
+    m->slot_tseg = calloc(m->max_slots, sizeof *m->slot_tseg);
+    m->slot_tprev = calloc(m->max_slots, sizeof *m->slot_tprev);
+    m->slot_tnext = calloc(m->max_slots, sizeof *m->slot_tnext);
     m->slot_free = calloc(m->max_slots, sizeof *m->slot_free);
     if (!m->slot_free) return -1;
     /* HV_JIT_SEGMENTS: the code cache is a ring of this many segments (default 8; 1: no ring, a full region drops
        everything). The boot of macOS 27 on a phone fills 1.5 GB in about three minutes and kept doing so: dropping
        it all meant translating the whole working set again each time. */
     hv_jit_ring(&m->jit, hv_knob[HV_K_JITSEGS] ? (uint32_t)hv_knob[HV_K_JITSEGS] : 8);
-    if (!m->slots || !m->slot_site || !m->slot_stub || !m->slot_cond || !m->slot_xa || !m->slot_xpa || !m->slot_xnext) return -1;
+    if (!m->slots || !m->slot_site || !m->slot_stub || !m->slot_cond || !m->slot_xa || !m->slot_xpa ||
+        !m->slot_xnext || !m->slot_xprev || !m->slot_tseg || !m->slot_tprev || !m->slot_tnext) return -1;
     for (int i = 0; i < HV_MAX_CPUS; i++) { /* untouched pages cost nothing, so every CPU gets its tables now */
         HvPerCpu *p = &m->percpu[i];
         p->ijc = calloc(HV_IJC_TABLES * HV_IJC_TABLE_BYTES / 8, 8);
@@ -391,6 +405,11 @@ void hv_machine_free(HvMachine *m) {
         free(m->ram[i].xhead);
     }
     free(m->blocks);
+    free(m->chunk_len);
+    free(m->chunk_seg);
+    free(m->chunk_next);
+    free(m->hash_seen);
+    for (int i = 0; i < HV_JIT_MAX_SEGS; i++) free(m->seg_slots[i]);
     for (int i = 0; i < HV_MAX_CPUS; i++) {
         /* hv_run keeps a thread send right for statistics; CPU workers have ended. */
         if (m->percpu[i].thread) mach_port_deallocate(mach_task_self(), m->percpu[i].thread);
@@ -414,6 +433,10 @@ void hv_machine_free(HvMachine *m) {
     free(m->slot_xa);
     free(m->slot_xpa);
     free(m->slot_xnext);
+    free(m->slot_xprev);
+    free(m->slot_tseg);
+    free(m->slot_tprev);
+    free(m->slot_tnext);
     free(m->slot_free);
     if (m->locks_initialized) {
         pthread_mutex_destroy(&m->big_mu);
@@ -463,24 +486,36 @@ HvRam *hv_ram_lookup(HvMachine *m, uint64_t pa) {
     return NULL;
 }
 
+void hv_reset_block_chunks(HvMachine *m) {
+    for (uint32_t c = 0; c < m->nblock_chunks; c++) {
+        m->chunk_len[c] = 0;
+        m->chunk_seg[c] = 0;
+        m->chunk_next[c] = c + 1u < m->nblock_chunks ? c + 1u : ~0u;
+    }
+    m->free_chunk_head = m->nblock_chunks ? 0u : ~0u;
+    for (int i = 0; i < HV_JIT_MAX_SEGS; i++) m->seg_chunk_head[i] = m->seg_chunk_tail[i] = ~0u;
+}
+
 HvBlock *hv_block_at(HvMachine *m, const uint32_t *pc) {
-    /* Blocks are in the order they were made, which is the order of their code except where the ring came round:
-       [0, blocks_wrap) are the older ones, at or past the ring's end. Nearest, not exact: CPUs place code in chunks of
-       their own, so neighbours in the list can be out of order by up to a chunk. */
-    int n = m->nblocks, wrap = (int)m->blocks_wrap;
-    if (wrap > n) wrap = n;
-    int lo = 0, hi = n - 1;
-    if (m->jit.seg_words && wrap) {
-        if (pc >= m->jit.base + m->jit.end) hi = wrap - 1;
-        else lo = wrap;
+    /* Blocks are placed into fixed chunks per JIT segment: scan only the segment containing pc. */
+    if (!m->nblocks || !pc || pc < m->jit.base) return NULL;
+    uint32_t seg = hv_jit_seg_of(m, pc);
+    HvBlock *best = NULL;
+    for (uint32_t c = m->seg_chunk_head[seg]; c != ~0u && c < m->nblock_chunks; c = m->chunk_next[c]) {
+        uint32_t len = m->chunk_len[c];
+        if (!len) continue;
+        if (len > m->block_chunk) len = m->block_chunk;
+        HvBlock *arr = &m->blocks[(size_t)c * m->block_chunk];
+        if (arr[0].code && arr[0].code > pc && (size_t)(arr[0].code - pc) > (1u << 18)) continue;
+        uint32_t lo = 0, hi = len - 1u;
+        while (lo < hi) {
+            uint32_t mid = (lo + hi + 1u) / 2u;
+            if (arr[mid].code && arr[mid].code <= pc) lo = mid;
+            else hi = mid - 1u;
+        }
+        if (arr[lo].code && arr[lo].code <= pc && (!best || arr[lo].code > best->code)) best = &arr[lo];
     }
-    if (lo > hi) return NULL;
-    while (lo < hi) {
-        int mid = (lo + hi + 1) / 2;
-        if (m->blocks[mid].code && m->blocks[mid].code <= pc) lo = mid;
-        else hi = mid - 1;
-    }
-    return &m->blocks[lo];
+    return best;
 }
 
 uint32_t *hv_smc_counts;
@@ -513,11 +548,13 @@ void hv_invalidate_code(HvMachine *m, uint64_t pa) {
         uint32_t idx = k - 1;
         k = m->slot_xnext[idx];
         m->slot_xnext[idx] = 0;
+        m->slot_xprev[idx] = 0;
         m->slot_xpa[idx] = 0;
+        if (m->slot_tseg[idx]) hv_slot_tlist_unlink(m, idx);
         __atomic_store_n(&m->slots[idx], 0, __ATOMIC_RELEASE);
-        uint32_t *site = m->slot_site[idx];
+        uint32_t *site = hv_slot_dec(m, m->slot_site[idx]);
         if (site) {
-            uint32_t insn = 0x14000000u | (uint32_t)((m->slot_stub[idx] - site) & 0x3ffffff); /* back to its stub */
+            uint32_t insn = 0x14000000u | (uint32_t)((hv_slot_dec(m, m->slot_stub[idx]) - site) & 0x3ffffff); /* back to its stub */
             hv_jit_write(&m->jit, site, &insn, 4);
             hv_jit_finish(&m->jit, site, 1);
         }
