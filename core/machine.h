@@ -242,6 +242,8 @@ typedef struct HvMachine {
     /* Devices: called between blocks every so often and while the CPU waits.
        Returns the host time (mach_absolute_time units) of the next timer event, or 0. */
     uint64_t (*tick)(struct HvMachine *m, HvCpu *cpu);
+    /* Timer-only tick (no device lock or device polling): called immediately on timer MSR writes. */
+    uint64_t (*timer_tick)(struct HvMachine *m, HvCpu *cpu);
     void *tick_opaque;
     /* GIC CPU interface system registers (ICC_*_EL1), reg = op0:op1:CRn:CRm:op2. */
     uint64_t (*icc_read)(struct HvMachine *m, HvCpu *cpu, uint32_t reg);

@@ -1161,7 +1161,7 @@ static int run_loop(HvCpu *cpu, int one) {
         /* Ticks take the device lock, so not every few blocks: on a kick (the 1 ms
            kicker, a device with work for CPU 0, an interrupt raised for this
            CPU) or once this CPU's own timer is due. */
-        if (m->tick && (kicked || (++since_tick >= 64 && (since_tick = 0, next_due && mach_absolute_time() >= next_due)))) {
+        if (m->tick && (kicked || (++since_tick >= 64 && (since_tick = 0, (next_due = cpu->timer_due) && mach_absolute_time() >= next_due)))) {
             since_tick = 0;
             next_due = m->tick(m, cpu);
             cpu->timer_due = next_due;

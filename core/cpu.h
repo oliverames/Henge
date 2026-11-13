@@ -104,6 +104,19 @@ typedef struct HvCpu {
     uint64_t ret_salt[2] __attribute__((aligned(128)));
     uint64_t helper_came_from; /* 0x510: where hv_helper_entry was called from, to tell if it goes back there */
     uint64_t win_base;       /* 0x518: HV_EL0_WINDOW: host address of guest user VA 0 (window.c), or 0 */
+    /* 0x520..0x578: 12 inline-accessible sysregs fitting in the alignment gap before tlb (0x580). */
+    uint64_t ttbr0_el1;      /* 0x520 */
+    uint64_t ttbr1_el1;      /* 0x528 */
+    uint64_t contextidr_el1; /* 0x530 */
+    uint64_t vbar_el1;       /* 0x538 */
+    uint64_t mair_el1;       /* 0x540 */
+    uint64_t cpacr_el1;      /* 0x548 */
+    uint64_t cntkctl_el1;    /* 0x550 */
+    uint64_t actlr_el1;      /* 0x558 */
+    uint64_t mdscr_el1;      /* 0x560 */
+    uint64_t amair_el1;      /* 0x568 */
+    uint64_t mpidr;          /* 0x570 */
+    uint64_t cntv_cval;      /* 0x578 */
     /* 0x580: [0] EL0 and unprivileged accesses, [1] EL1, [2] EL1 with PSTATE.PAN set,
        so toggling PAN (the kernel does it around every user copy) flushes nothing.
        [slot][EL0, EL1, EL1 with PAN, unused]: a slot's three in one 128-byte cache line. */
@@ -122,18 +135,8 @@ typedef struct HvCpu {
        compare-and-swap against the value the LDXR saw, the way QEMU does it, so
        another CPU's store in between makes it fail. */
 
-    uint64_t ttbr0_el1;
-    uint64_t ttbr1_el1;
-    uint64_t mair_el1;
-    uint64_t amair_el1;
-    uint64_t vbar_el1;
     uint64_t afsr0_el1, afsr1_el1;
-    uint64_t contextidr_el1;
-    uint64_t cpacr_el1;
-    uint64_t mdscr_el1;
     uint64_t csselr_el1;
-    uint64_t cntkctl_el1;
-    uint64_t actlr_el1;
     uint64_t sctlr_seen;     /* MMU/FP state the current TLB contents were filled under */
     uint64_t timer_due;      /* host time this CPU's timer next fires (the dispatcher's last tick said), 0: none */
     /* TLB slots (table << HV_TLB_BITS | index) filled with user addresses since the
@@ -167,10 +170,9 @@ typedef struct HvCpu {
     uint64_t ttbr0_changed_at; /* --stats: host time of the last TTBR0 change */
 
     /* Generic timer: physical and virtual. The counter is host time scaled to 24 MHz. */
-    uint64_t cntv_ctl, cntv_cval;
+    uint64_t cntv_ctl;
     uint64_t cntp_ctl, cntp_cval;
 
-    uint64_t mpidr;
     uint32_t index;          /* which CPU: m->percpu[index] holds its caches and interrupt lines */
     struct HvPerCpu *pc_state;
     uint64_t icount;         /* blocks entered, for tests and stats */
@@ -228,6 +230,18 @@ typedef struct HvCpu {
 #define HV_CPU_PAR_EL1     0x4f0
 #define HV_CPU_CNTVOFF     0x4f8
 #define HV_CPU_WIN_BASE    0x518
+#define HV_CPU_TTBR0_EL1   0x520
+#define HV_CPU_TTBR1_EL1   0x528
+#define HV_CPU_CONTEXTIDR_EL1 0x530
+#define HV_CPU_VBAR_EL1    0x538
+#define HV_CPU_MAIR_EL1    0x540
+#define HV_CPU_CPACR_EL1   0x548
+#define HV_CPU_CNTKCTL_EL1 0x550
+#define HV_CPU_ACTLR_EL1   0x558
+#define HV_CPU_MDSCR_EL1   0x560
+#define HV_CPU_AMAIR_EL1   0x568
+#define HV_CPU_MPIDR       0x570
+#define HV_CPU_CNTV_CVAL   0x578
 
 /* Indirect-branch cache: one table per block-flags value, 64K entries of 16 bytes,
    indexed by ((va ^ va >> 16) >> 2) so code at the same offset in different pages spreads out. */
@@ -252,6 +266,18 @@ _Static_assert(offsetof(HvCpu, ret_salt) == HV_CPU_RET_SALT, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, tcr_el1) == HV_CPU_TCR_EL1, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, cntvoff) == HV_CPU_CNTVOFF, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, win_base) == HV_CPU_WIN_BASE, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, ttbr0_el1) == HV_CPU_TTBR0_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, ttbr1_el1) == HV_CPU_TTBR1_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, contextidr_el1) == HV_CPU_CONTEXTIDR_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, vbar_el1) == HV_CPU_VBAR_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, mair_el1) == HV_CPU_MAIR_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, cpacr_el1) == HV_CPU_CPACR_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, cntkctl_el1) == HV_CPU_CNTKCTL_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, actlr_el1) == HV_CPU_ACTLR_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, mdscr_el1) == HV_CPU_MDSCR_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, amair_el1) == HV_CPU_AMAIR_EL1, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, mpidr) == HV_CPU_MPIDR, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, cntv_cval) == HV_CPU_CNTV_CVAL, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, par_el1) == HV_CPU_PAR_EL1, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, ret_tab) == HV_CPU_RET_TAB, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, gaddend) == HV_CPU_GADDEND, "HvCpu layout");

@@ -21,10 +21,10 @@
 #define ID_AA64MMFR0 0x0000000000100025ull /* 48-bit PA, 16-bit ASID, 4K/16K/64K granules */
 #define ID_AA64MMFR1 0x0000000000111000ull /* HPDS, LOR, PAN */
 #define ID_AA64DFR0  0x0000000000000006ull /* Armv8 debug, no PMU */
-#define MIDR         0x611f0220ull         /* Apple; a configuration constant for now */
-#define CTR_EL0      0x9444c004ull         /* 64-byte lines, PIPT I-cache, IDC */
+#define MIDR         HV_MIDR               /* Apple; a configuration constant for now */
+#define CTR_EL0      HV_CTR_EL0            /* 64-byte lines, PIPT I-cache, IDC */
 #define CLIDR        0x0a200023ull         /* L1 split, L2 unified */
-#define CNTFRQ       24000000ull
+#define CNTFRQ       HV_CNTFRQ
 
 static uint64_t counter(void) {
     return mach_absolute_time(); /* 24 MHz on Apple silicon */
@@ -252,7 +252,8 @@ static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
     }
     /* Timer outputs follow their registers at once, as in hardware: a masked
        timer must drop its line before the handler's EOI. */
-    if (m->tick) m->tick(m, cpu);
+    if (m->timer_tick) cpu->timer_due = m->timer_tick(m, cpu);
+    else if (m->tick) cpu->timer_due = m->tick(m, cpu);
     return 0;
 other:
     /* PAuth key registers (CRn 2, CRm 1..3): kept, never used, since signing is a no-op. */

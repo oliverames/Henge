@@ -5,6 +5,10 @@
 
 #include "cpu.h"
 
+#define HV_MIDR    0x611f0220ull
+#define HV_CTR_EL0 0x9444c004ull
+#define HV_CNTFRQ  24000000ull
+
 /* MRS, MSR (register and immediate), and SYS (DC, IC, TLBI, AT).
    Each returns 1 if the block must leave. */
 int hv_sysreg_mrs(HvCpu *cpu, uint32_t insn, uint64_t pc);
