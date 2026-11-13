@@ -18,6 +18,7 @@ int main(void) {
         TLFWThing *t = [TLFWThing new];
         printf("%s | %s | counter %d | add %d %d | loads %d\n", t.what.UTF8String, t.shouted.UTF8String, tlfw_counter,
                tlfw_add(1, 2), tlfw_add(1, 2), [TLFWThing loads]);
+        printf("main bundle %s\n", [(__bridge NSString *)CFBundleGetIdentifier(CFBundleGetMainBundle()) UTF8String]);
         printf("PASS fwapp\n");
     }
     return 0;

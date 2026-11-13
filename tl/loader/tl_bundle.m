@@ -42,12 +42,14 @@ void *tl_main_bundle(void) { return (__bridge void *)g_bundle; }
 static CFBundleRef g_cf_main, g_cf_ns[64];
 void *tl_cf_main_bundle(int ns) {
     @autoreleasepool {
-        int own = ns > 0 && ns < 64 && g_ns_bundles[ns];
-        NSBundle *b = own ? g_ns_bundles[ns] : g_bundle;
-        if (!b) return NULL;
-        CFBundleRef *slot = own ? &g_cf_ns[ns] : &g_cf_main;
-        if (!*slot) *slot = CFBundleCreate(NULL, (__bridge CFURLRef)b.bundleURL);
-        return *slot;
+        @synchronized([NSBundle class]) {
+            int own = ns > 0 && ns < 64 && g_ns_bundles[ns];
+            NSBundle *b = own ? g_ns_bundles[ns] : g_bundle;
+            if (!b) return NULL;
+            CFBundleRef *slot = own ? &g_cf_ns[ns] : &g_cf_main;
+            if (!*slot) *slot = CFBundleCreate(NULL, (__bridge CFURLRef)b.bundleURL);
+            return *slot;
+        }
     }
 }
 
