@@ -3,6 +3,21 @@
 Tracking issue: `oliverames/Henge#21` ([Testing still needed for open upstream PRs](https://github.com/oliverames/Henge/issues/21))
 Latest status log: [docs/status-2026-11-13.md](docs/status-2026-11-13.md)
 
+## 2026-11-14 (later) - Research notes upstream
+
+**What changed**
+- Distilled the local research (profiles, TLB and JIT A/B folders, GPU and panic logs, fork scan, JIT and mouse logs) into `docs/research/` and added it to upstream docs PR #193, now titled as the research-notes PR. The same notes are on fork main.
+- Posted comments linking the notes on upstream issues #102 (AGX crash and #188), #120 (performance), #131 (sound and #191), #160 and #47 (LiveContainer JIT and #192).
+- Corrected #188's body. Its 420 to 550 ms per-pipeline figure came from DXMT's notes, not a measurement on the Duo. Henge's log shows 0 to 2 ms per compiled pipeline, and the measured win is the archive hit rate (527 from the archive against 15 compiled).
+
+**Decisions made**
+- Notes were scrubbed of device names, UDIDs, team IDs, local paths and family names. Raw logs stay local in `henge-worktrees/`.
+- No new comment on #73, since the existing thread already covers the research.
+
+**Open questions**
+- `docs/status-2026-11-13.md` says "33 evictions averaging 250 ms", which matches no saved log. Treat it as unverified.
+- The TLB size A/B (#134) was never run: only the three builds exist.
+
 ## 2026-11-14 - Upstream PR consolidation, duplicate cleanup, branch pruning
 
 **What changed**
