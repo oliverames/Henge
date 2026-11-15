@@ -3,6 +3,23 @@
 Tracking issue: `oliverames/Henge#21` ([Testing still needed for open upstream PRs](https://github.com/oliverames/Henge/issues/21))
 Latest status log: [docs/status-2026-11-13.md](docs/status-2026-11-13.md)
 
+## 2026-11-14 - Upstream PR consolidation, duplicate cleanup, branch pruning
+
+**What changed**
+- Consolidated 30 overlapping upstream PRs into 7 topic PRs on current upstream main, each passing `make test`: #186 engine (#132 #145 #175 #177), #187 PVG surfaces (#143 #172), #188 PVG Metal tasks (#133 #152), #189 JIT script (#128 #153), #190 display (#135 #136 #154 #155 #156 #165 #179 #182), #191 input and audio (#138 #151 #180 #181), #192 JIT setup (#146-#149). Closed the replaced PRs with links.
+- Closed #171 in favor of #121 and #140 in favor of #166 after a diff comparison. Posted comments on #166, #127, #161, #82 and #72 (texts in `henge-worktrees/upstream-comment-drafts-2026-11-14.md`).
+- Opened #193 with the corner research docs, including the Eraserhead SVGs and the 2026-11-12 Duo results, at Oliver's choice.
+- Rebased #134 and #157 onto upstream main. Marked untested PRs as drafts.
+- Deleted 29 fork branches whose work was on main or replaced by an open PR. SHAs are in `henge-worktrees/deleted-branches-2026-11-14.txt`.
+- Rewrote `henge-worktrees/HANDOFF.md` and archived the 2026-11-12 version. Added a PR number map to oliverames/Henge#21.
+
+**Decisions made**
+- A topic PR stays a draft while any part of it is on #21's untested list.
+- #191 leaves out the HID++ `0x53`/`0x56` USB routing, which stays fork-only.
+
+**Left off at**
+- Nothing pushed is pending. Next is Duo testing against the new PR numbers, then marking PRs ready.
+
 ## 2026-11-13 - Session wrap-up: fork main consolidation, Henge.ipa rebuild, and upstream PR submission (#128-#182)
 
 **What changed**
