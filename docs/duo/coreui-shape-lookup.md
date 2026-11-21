@@ -5,7 +5,7 @@ Tools: `ipsw dyld disass` (symbols, `--vaddr`), `ipsw dyld macho CoreUI --string
 
 ## 1. Files
 Copied 7 files (Eraserhead_1506/1665/1864/1964/1986/2234/2266.svg) to
-/Users/oliverames/Developer/Forks/henge-worktrees/project-files/display-shapes/
+/Users/oliverames/Developer/Projects/henge/henge-worktrees/project-files/display-shapes/
 (/mnt/project-files does not exist on this Mac; that is the path.)
 Host `assetutil --info` of SystemAppearance.bundle/Contents/Resources/Assets.car lists exactly these seven Eraserhead_<N> names.
 
